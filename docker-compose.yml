@@ -2,16 +2,16 @@ version: "3.9"
 
 services:
   bettafish:
-    image: ghcr.io/666ghj/bettafish:latest
+    # image: ghcr.io/666ghj/bettafish:latest
     # Speed up mirror
-    # image: ghcr.nju.edu.cn/666ghj/bettafish:latest
+    image: ghcr.nju.edu.cn/666ghj/bettafish:latest
     container_name: bettafish
     restart: unless-stopped
     environment:
       - PYTHONUNBUFFERED=1
       - STREAMLIT_SERVER_ENABLE_FILE_WATCHER=false
     ports:
-      - "5000:5000"
+      - "5050:5000"
       - "8501:8501"
       - "8502:8502"
       - "8503:8503"

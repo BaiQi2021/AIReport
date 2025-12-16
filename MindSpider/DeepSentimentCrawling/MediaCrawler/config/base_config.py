@@ -9,8 +9,8 @@
 # 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
 
 # 基础配置
-PLATFORM = "bili"  # 平台，xhs | dy | ks | bili | wb | tieba | zhihu
-KEYWORDS = "电影鬼灭之刃,亲属想侵吞3姐妹亡父赔偿款,网警斩断侵害未成年人网络黑色产业链,2007年后出生的人不能在马尔代夫吸烟,沈月,是公主也是自己的骑士,以军虐囚视频,唐朝诡事录,广州地铁回应APP乘车码频繁弹窗广告,全红婵的减肥计划精确到克"  # 关键词搜索配置，以英文逗号分隔
+PLATFORM = "zhihu"  # 平台，xhs | dy | ks | bili | wb | tieba | zhihu
+KEYWORDS = "百万彩礼,段永平回归,CopilotKit,MLXG败诉,妹妹被收养,邵永灵,红米K80,小米车祸,黄国昌,柬泰前线"  # 关键词搜索配置，以英文逗号分隔
 LOGIN_TYPE = "qrcode"  # qrcode or phone or cookie
 COOKIES = ""
 CRAWLER_TYPE = "search"  # 爬取类型，search(关键词搜索) | detail(帖子详情)| creator(创作者主页数据)
@@ -70,7 +70,7 @@ USER_DATA_DIR = "%s_user_data_dir"  # %s will be replaced by platform name
 START_PAGE = 1
 
 # 爬取视频/帖子的数量控制
-CRAWLER_MAX_NOTES_COUNT = 5
+CRAWLER_MAX_NOTES_COUNT = 10
 
 # 并发爬虫数量控制
 MAX_CONCURRENCY_NUM = 1
