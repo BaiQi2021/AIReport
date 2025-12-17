@@ -190,6 +190,70 @@ CREATE INDEX `idx_task_topic_platform` ON `crawling_tasks` (`topic_id`, `platfor
 CREATE INDEX `idx_news_date_platform` ON `daily_news` (`crawl_date`, `source_platform`);
 
 -- ===============================
+-- DeepSentimentCrawling - 量子位(QbitAI)爬虫相关表
+-- ===============================
+
+-- ----------------------------
+-- Table structure for qbitai_article
+-- 量子位文章表
+-- ----------------------------
+DROP TABLE IF EXISTS `qbitai_article`;
+CREATE TABLE `qbitai_article` (
+    `id` int NOT NULL AUTO_INCREMENT COMMENT '自增ID',
+    `article_id` varchar(255) NOT NULL COMMENT '文章唯一ID',
+    `title` varchar(500) NOT NULL COMMENT '文章标题',
+    `description` text COMMENT '文章描述/摘要',
+    `content` longtext COMMENT '文章内容',
+    `article_url` varchar(512) NOT NULL COMMENT '文章链接',
+    `author` varchar(255) DEFAULT NULL COMMENT '文章作者',
+    `publish_time` bigint DEFAULT NULL COMMENT '发布时间戳',
+    `publish_date` date DEFAULT NULL COMMENT '发布日期',
+    `read_count` int DEFAULT 0 COMMENT '阅读数',
+    `like_count` int DEFAULT 0 COMMENT '点赞数',
+    `comment_count` int DEFAULT 0 COMMENT '评论数',
+    `share_count` int DEFAULT 0 COMMENT '分享数',
+    `collect_count` int DEFAULT 0 COMMENT '收藏数',
+    `category` varchar(100) DEFAULT NULL COMMENT '文章分类',
+    `tags` text COMMENT '文章标签(JSON格式)',
+    `cover_image` varchar(512) DEFAULT NULL COMMENT '文章封面图片URL',
+    `source_keyword` varchar(255) DEFAULT '' COMMENT '来源关键词',
+    `is_original` tinyint DEFAULT 1 COMMENT '是否原创(1-是, 0-否)',
+    `add_ts` bigint NOT NULL COMMENT '记录添加时间戳',
+    `last_modify_ts` bigint NOT NULL COMMENT '记录最后修改时间戳',
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `idx_qbitai_article_unique` (`article_id`),
+    KEY `idx_qbitai_article_date` (`publish_date`),
+    KEY `idx_qbitai_article_url` (`article_url`),
+    KEY `idx_qbitai_article_time` (`publish_time`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='量子位文章表';
+
+-- ----------------------------
+-- Table structure for qbitai_article_comment
+-- 量子位文章评论表
+-- ----------------------------
+DROP TABLE IF EXISTS `qbitai_article_comment`;
+CREATE TABLE `qbitai_article_comment` (
+    `id` int NOT NULL AUTO_INCREMENT COMMENT '自增ID',
+    `comment_id` varchar(255) NOT NULL COMMENT '评论唯一ID',
+    `article_id` varchar(255) NOT NULL COMMENT '对应的文章ID',
+    `user_name` varchar(255) DEFAULT NULL COMMENT '评论者用户名',
+    `user_avatar` varchar(512) DEFAULT NULL COMMENT '评论者头像URL',
+    `content` text NOT NULL COMMENT '评论内容',
+    `publish_time` bigint DEFAULT NULL COMMENT '发布时间戳',
+    `publish_date` date DEFAULT NULL COMMENT '发布日期',
+    `like_count` int DEFAULT 0 COMMENT '点赞数',
+    `sub_comment_count` int DEFAULT 0 COMMENT '子评论数',
+    `parent_comment_id` varchar(255) DEFAULT NULL COMMENT '父评论ID(回复评论时)',
+    `add_ts` bigint NOT NULL COMMENT '记录添加时间戳',
+    `last_modify_ts` bigint NOT NULL COMMENT '记录最后修改时间戳',
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `idx_qbitai_comment_unique` (`comment_id`),
+    KEY `idx_qbitai_comment_article` (`article_id`),
+    KEY `idx_qbitai_comment_date` (`publish_date`),
+    FOREIGN KEY (`article_id`) REFERENCES `qbitai_article`(`article_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='量子位文章评论表';
+
+-- ===============================
 -- 数据库配置优化建议
 -- ===============================
 
