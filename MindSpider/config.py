@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     MINDSPIDER_API_KEY: Optional[str] = Field(None, description="MINDSPIDER API密钥")
     MINDSPIDER_BASE_URL: Optional[str] = Field("https://api.deepseek.com", description="MINDSPIDER API基础URL，推荐deepseek-chat模型使用https://api.deepseek.com")
     MINDSPIDER_MODEL_NAME: Optional[str] = Field("deepseek-chat", description="MINDSPIDER API模型名称, 推荐deepseek-chat")
+    REPORT_ENGINE_API_KEY: Optional[str] = Field(None, description="Report Engine API密钥")
+    REPORT_ENGINE_BASE_URL: Optional[str] = Field(None, description="Report Engine Base URL")
+    REPORT_ENGINE_MODEL_NAME: Optional[str] = Field(None, description="Report Engine Model Name")
+    GEMINI_API_KEY: Optional[str] = Field(None, description="Google Gemini API密钥")
+    GEMINI_BASE_URL: Optional[str] = Field("https://generativelanguage.googleapis.com/v1beta/openai/", description="Google Gemini API Base URL")
+    GEMINI_MODEL_NAME: Optional[str] = Field("gemini-2.0-flash", description="Google Gemini Model Name")
 
     class Config:
         env_file = ENV_FILE

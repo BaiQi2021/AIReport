@@ -25,6 +25,7 @@ cryptography==46.0.3
 # 话题提取模块依赖
 # ===============================
 openai
+google-generativeai
 pydantic-settings
 numpy
 pandas==2.2.3

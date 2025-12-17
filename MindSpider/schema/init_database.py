@@ -31,7 +31,27 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root))
 
-from config import settings
+# 1. 先导入 MindSpider 的配置
+# 必须在添加 MediaCrawler 路径之前导入，否则会被 MediaCrawler/config 包遮蔽
+try:
+    import config as mindspider_config
+    settings = mindspider_config.settings
+except ImportError:
+    # Fallback
+    from config import settings
+
+# 2. 添加 MediaCrawler 路径以支持导入其模型
+media_crawler_path = project_root / "DeepSentimentCrawling/MediaCrawler"
+sys.path.insert(0, str(media_crawler_path))
+
+# 3. 尝试导入 MediaCrawler 的 Base
+try:
+    from database.models import Base as MediaBase
+    # 确保导入所有模型类，以便它们注册到 MediaBase
+    from database import models as media_models_module
+except ImportError as e:
+    logger.warning(f"无法导入 MediaCrawler models: {e}，相关表可能无法创建")
+    MediaBase = None
 
 def _env(key: str, default: Optional[str] = None) -> Optional[str]:
     v = os.getenv(key)
@@ -105,6 +125,11 @@ async def main() -> None:
     # 只需创建一次，SQLAlchemy 会自动处理表之间的依赖关系
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        
+        # 创建 MediaCrawler 的表
+        if MediaBase:
+            logger.info("正在创建 MediaCrawler 相关表...")
+            await conn.run_sync(MediaBase.metadata.create_all)
 
     # 保持原有视图创建和释放逻辑
     dialect_name = engine.url.get_backend_name()
