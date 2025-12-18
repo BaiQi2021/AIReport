@@ -29,7 +29,12 @@ class Settings(BaseSettings):
     # Using 'REPORT_ENGINE' prefix to match previous setup, or simplify to just API_KEY
     REPORT_ENGINE_API_KEY: Optional[str] = Field(None, description="API Key for the LLM")
     REPORT_ENGINE_BASE_URL: Optional[str] = Field("https://generativelanguage.googleapis.com/v1beta/openai/", description="Base URL for the LLM API")
-    REPORT_ENGINE_MODEL_NAME: Optional[str] = Field("gemini-2.0-flash", description="Model name to use")
+    REPORT_ENGINE_MODEL_NAME: Optional[str] = Field("gemini-2.0-flash-exp", description="Model name to use")
+    
+    # Gemini API Configuration (向后兼容)
+    GEMINI_API_KEY: Optional[str] = Field(None, description="Gemini API Key")
+    GEMINI_BASE_URL: Optional[str] = Field("https://generativelanguage.googleapis.com/v1beta/openai/", description="Gemini Base URL")
+    GEMINI_MODEL_NAME: Optional[str] = Field("gemini-2.0-flash-exp", description="Gemini Model name")
 
     class Config:
         env_file = str(ENV_FILE)

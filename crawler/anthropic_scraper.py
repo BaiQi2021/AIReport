@@ -5,6 +5,7 @@ Anthropic Research & News Scraper
 爬取Anthropic官网的研究论文和新闻
 """
 
+import asyncio
 import json
 from datetime import datetime
 from typing import Dict, List, Optional

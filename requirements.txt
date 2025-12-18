@@ -9,3 +9,4 @@ loguru
 pydantic
 pydantic-settings
 greenlet
+tabulate

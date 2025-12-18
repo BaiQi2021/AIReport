@@ -17,6 +17,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from crawler import utils
+from crawler.constants import DEFAULT_HEADERS
 
 logger = utils.setup_logger()
 
@@ -24,32 +25,38 @@ logger = utils.setup_logger()
 class BaseWebScraper(ABC):
     """网页爬虫基类"""
     
-    def __init__(self, base_url: str, company_name: str, use_proxy: bool = False):
+    def __init__(
+        self,
+        base_url: str,
+        company_name: str,
+        use_proxy: bool = False,
+        timeout: int = 30,
+        max_retries: int = 3,
+    ):
+        """
+        初始化爬虫
+        
+        Args:
+            base_url: 基础URL
+            company_name: 公司/来源名称
+            use_proxy: 是否使用代理
+            timeout: 请求超时时间（秒）
+            max_retries: 最大重试次数
+        """
         self.base_url = base_url
         self.company_name = company_name
         self.use_proxy = use_proxy
-        self.headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-            "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
-            "Cache-Control": "max-age=0",
-            "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-            "Sec-Ch-Ua-Mobile": "?0",
-            "Sec-Ch-Ua-Platform": '"macOS"',
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Sec-Fetch-User": "?1",
-            "Upgrade-Insecure-Requests": "1"
-        }
-        self.session = None
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.headers = DEFAULT_HEADERS.copy()
+        self.session: Optional[httpx.AsyncClient] = None
         self.proxy_pool = None
     
     async def init(self):
         """初始化HTTP客户端"""
         kwargs = {
             "headers": self.headers,
-            "timeout": 30,
+            "timeout": self.timeout,
             "verify": False,
             "follow_redirects": True
         }
@@ -70,46 +77,74 @@ class BaseWebScraper(ABC):
         if self.session:
             await self.session.aclose()
     
+    async def __aenter__(self):
+        """异步上下文管理器入口"""
+        await self.init()
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """异步上下文管理器出口"""
+        await self.close()
+    
     async def fetch_page(self, url: str, **kwargs) -> Optional[str]:
-        """获取页面内容"""
-        max_retries = 3
-        for attempt in range(max_retries):
+        """
+        获取页面内容
+        
+        Args:
+            url: 目标URL
+            **kwargs: 传递给httpx的额外参数
+            
+        Returns:
+            页面HTML内容，失败返回None
+        """
+        for attempt in range(self.max_retries):
             try:
                 response = await self.session.get(url, **kwargs)
                 response.raise_for_status()
                 return response.text
             except Exception as e:
-                logger.error(f"Failed to fetch page {url} (attempt {attempt + 1}/{max_retries}): {e}")
+                logger.error(f"Failed to fetch page {url} (attempt {attempt + 1}/{self.max_retries}): {e}")
                 
                 # 如果使用代理且失败，尝试换一个代理
-                if self.use_proxy and self.proxy_pool and attempt < max_retries - 1:
-                    # 标记当前代理失败
-                    current_proxy = self.session._transport._pool._proxy_url if hasattr(self.session, '_transport') else None
-                    if current_proxy:
-                        self.proxy_pool.mark_failed(str(current_proxy))
-                    
-                    # 获取新代理
-                    new_proxy_dict = self.proxy_pool.get_proxy_dict()
-                    if new_proxy_dict:
-                        await self.session.aclose()
-                        self.session = httpx.AsyncClient(
-                            headers=self.headers,
-                            timeout=30,
-                            verify=False,
-                            follow_redirects=True,
-                            proxies=new_proxy_dict
-                        )
-                        logger.info(f"Switched to new proxy, retrying...")
-                        await asyncio.sleep(2)
-                        continue
+                if self.use_proxy and self.proxy_pool and attempt < self.max_retries - 1:
+                    await self._switch_proxy()
+                    await asyncio.sleep(2)
+                    continue
                 
-                if attempt < max_retries - 1:
+                if attempt < self.max_retries - 1:
                     await asyncio.sleep(2 ** attempt)  # 指数退避
-                
+        
         return None
     
+    async def _switch_proxy(self):
+        """切换代理"""
+        try:
+            # 标记当前代理失败（简化实现）
+            new_proxy_dict = self.proxy_pool.get_proxy_dict()
+            if new_proxy_dict:
+                await self.session.aclose()
+                self.session = httpx.AsyncClient(
+                    headers=self.headers,
+                    timeout=self.timeout,
+                    verify=False,
+                    follow_redirects=True,
+                    proxies=new_proxy_dict
+                )
+                logger.info(f"Switched to new proxy")
+        except Exception as e:
+            logger.error(f"Failed to switch proxy: {e}")
+    
     async def fetch_json(self, url: str, **kwargs) -> Optional[Dict]:
-        """获取JSON数据"""
+        """
+        获取JSON数据
+        
+        Args:
+            url: 目标URL
+            **kwargs: 传递给httpx的额外参数
+            
+        Returns:
+            JSON数据字典，失败返回None
+        """
         try:
             response = await self.session.get(url, **kwargs)
             response.raise_for_status()
@@ -120,16 +155,41 @@ class BaseWebScraper(ABC):
     
     @abstractmethod
     async def get_article_list(self, page: int = 1) -> List[Dict]:
-        """获取文章列表（需要子类实现）"""
+        """
+        获取文章列表（需要子类实现）
+        
+        Args:
+            page: 页码
+            
+        Returns:
+            文章列表
+        """
         pass
     
     @abstractmethod
     async def get_article_detail(self, article_id: str, url: str) -> Optional[Dict]:
-        """获取文章详情（需要子类实现）"""
+        """
+        获取文章详情（需要子类实现）
+        
+        Args:
+            article_id: 文章ID
+            url: 文章URL
+            
+        Returns:
+            文章详情字典，失败返回None
+        """
         pass
     
     def extract_article_id(self, url: str) -> Optional[str]:
-        """从URL中提取文章ID"""
+        """
+        从URL中提取文章ID
+        
+        Args:
+            url: 文章URL
+            
+        Returns:
+            文章ID，失败返回None
+        """
         patterns = [
             r'/article[s]?/([^/\?]+)',
             r'/post[s]?/([^/\?]+)',
@@ -154,7 +214,15 @@ class BaseWebScraper(ABC):
         return None
     
     def parse_timestamp(self, time_str: str) -> int:
-        """解析时间字符串为Unix时间戳"""
+        """
+        解析时间字符串为Unix时间戳
+        
+        Args:
+            time_str: 时间字符串
+            
+        Returns:
+            Unix时间戳（秒）
+        """
         try:
             if not time_str:
                 return int(datetime.now().timestamp())
@@ -215,7 +283,7 @@ class BaseWebScraper(ABC):
                 try:
                     dt = datetime.strptime(time_str[:25], fmt)
                     return int(dt.timestamp())
-                except:
+                except ValueError:
                     continue
             
             logger.warning(f"Failed to parse timestamp: {time_str}")
@@ -226,7 +294,16 @@ class BaseWebScraper(ABC):
             return int(datetime.now().timestamp())
     
     def extract_reference_links(self, soup: BeautifulSoup, content_elem: Optional[BeautifulSoup]) -> List[Dict]:
-        """提取文章中的参考链接"""
+        """
+        提取文章中的参考链接
+        
+        Args:
+            soup: BeautifulSoup对象
+            content_elem: 内容元素
+            
+        Returns:
+            参考链接列表
+        """
         reference_links = []
         
         if not content_elem:
@@ -272,37 +349,8 @@ class BaseWebScraper(ABC):
                 continue
             
             # 识别参考来源
-            is_reference = False
-            ref_type = 'other'
-            href_lower = href.lower()
-            
-            # 论文相关
-            if any(domain in href_lower for domain in ['arxiv.org', 'paperswithcode.com', 'semanticscholar.org', 'acm.org', 'ieee.org', 'nature.com', 'science.org']):
-                is_reference = True
-                ref_type = 'paper'
-            # GitHub/代码仓库
-            elif any(domain in href_lower for domain in ['github.com', 'gitlab.com', 'huggingface.co']):
-                is_reference = True
-                ref_type = 'code'
-            # AI公司官方网站
-            elif any(domain in href_lower for domain in ['openai.com', 'anthropic.com', 'google.com', 'microsoft.com', 'meta.com', 'nvidia.com', 'apple.com', 'deepmind.com', 'baidu.com', 'alibaba.com']):
-                is_reference = True
-                ref_type = 'official'
-            # 技术博客
-            elif any(domain in href_lower for domain in ['blog.', 'medium.com', 'towardsdatascience.com', 'hackernoon.com']):
-                is_reference = True
-                ref_type = 'blog'
-            # 社交媒体
-            elif any(domain in href_lower for domain in ['twitter.com', 'x.com', 'zhihu.com', 'youtube.com', 'bilibili.com']):
-                if not any(k in href_lower for k in ['share', 'intent/tweet', 'sharer']):
-                    is_reference = True
-                    ref_type = 'social'
-            # 其他外部链接
-            elif href.startswith('http'):
-                is_reference = True
-                ref_type = 'external'
-            
-            if is_reference:
+            ref_type = self._classify_reference_link(href)
+            if ref_type:
                 seen_urls.add(href)
                 unique_links.append({
                     'title': text[:200],
@@ -313,8 +361,69 @@ class BaseWebScraper(ABC):
         logger.info(f"Extracted {len(unique_links)} reference links")
         return unique_links
     
+    def _classify_reference_link(self, url: str) -> Optional[str]:
+        """
+        分类参考链接
+        
+        Args:
+            url: 链接URL
+            
+        Returns:
+            链接类型，不符合条件返回None
+        """
+        url_lower = url.lower()
+        
+        # 论文相关
+        if any(domain in url_lower for domain in [
+            'arxiv.org', 'paperswithcode.com', 'semanticscholar.org',
+            'acm.org', 'ieee.org', 'nature.com', 'science.org'
+        ]):
+            return 'paper'
+        
+        # GitHub/代码仓库
+        elif any(domain in url_lower for domain in [
+            'github.com', 'gitlab.com', 'huggingface.co'
+        ]):
+            return 'code'
+        
+        # AI公司官方网站
+        elif any(domain in url_lower for domain in [
+            'openai.com', 'anthropic.com', 'google.com', 'microsoft.com',
+            'meta.com', 'nvidia.com', 'apple.com', 'deepmind.com',
+            'baidu.com', 'alibaba.com'
+        ]):
+            return 'official'
+        
+        # 技术博客
+        elif any(domain in url_lower for domain in [
+            'blog.', 'medium.com', 'towardsdatascience.com', 'hackernoon.com'
+        ]):
+            return 'blog'
+        
+        # 社交媒体
+        elif any(domain in url_lower for domain in [
+            'twitter.com', 'x.com', 'zhihu.com', 'youtube.com', 'bilibili.com'
+        ]):
+            # 排除分享按钮
+            if not any(k in url_lower for k in ['share', 'intent/tweet', 'sharer']):
+                return 'social'
+        
+        # 其他外部链接
+        elif url.startswith('http'):
+            return 'external'
+        
+        return None
+    
     def clean_text(self, text: str) -> str:
-        """清理文本"""
+        """
+        清理文本
+        
+        Args:
+            text: 原始文本
+            
+        Returns:
+            清理后的文本
+        """
         if not text:
             return ''
         # 移除多余的空白字符
@@ -322,11 +431,18 @@ class BaseWebScraper(ABC):
         return text.strip()
     
     def parse_tags(self, tag_elements) -> str:
-        """解析标签"""
+        """
+        解析标签
+        
+        Args:
+            tag_elements: 标签元素列表
+            
+        Returns:
+            JSON格式的标签字符串
+        """
         tags = []
         for tag_elem in tag_elements:
             tag_text = tag_elem.get_text(strip=True)
             if tag_text:
                 tags.append(tag_text)
         return json.dumps(tags, ensure_ascii=False) if tags else ''
-

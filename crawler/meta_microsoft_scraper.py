@@ -5,6 +5,7 @@ Meta AI & Microsoft AI Scraper
 爬取Meta AI和Microsoft AI官网的研究和博客
 """
 
+import asyncio
 import json
 from datetime import datetime
 from typing import Dict, List, Optional

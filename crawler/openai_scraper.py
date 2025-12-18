@@ -227,18 +227,42 @@ async def save_company_article_to_db(article: Dict):
         result = await session.execute(stmt)
         existing = result.scalar_one_or_none()
         
+        # 字段长度限制映射（根据数据库模型定义）
+        field_length_limits = {
+            'article_id': 255,
+            'company': 100,
+            'author': 255,
+            'publish_date': 10,
+            'category': 100,
+            'cover_image': 512,
+            'article_type': 50,
+        }
+        
+        def truncate_field(key: str, value):
+            """截断字段值到指定长度"""
+            if key in field_length_limits and value is not None:
+                if isinstance(value, str):
+                    max_length = field_length_limits[key]
+                    if len(value) > max_length:
+                        return value[:max_length]
+            return value
+        
         if existing:
             existing.last_modify_ts = utils.get_current_timestamp()
             for key, value in article.items():
                 if hasattr(existing, key) and key not in ['id', 'add_ts']:
-                    setattr(existing, key, value)
+                    truncated_value = truncate_field(key, value)
+                    setattr(existing, key, truncated_value)
             logger.info(f"Updated company article: {article_id}")
         else:
             article['add_ts'] = utils.get_current_timestamp()
             article['last_modify_ts'] = utils.get_current_timestamp()
             
             valid_keys = {c.name for c in CompanyArticle.__table__.columns}
-            filtered_article = {k: v for k, v in article.items() if k in valid_keys}
+            filtered_article = {}
+            for k, v in article.items():
+                if k in valid_keys:
+                    filtered_article[k] = truncate_field(k, v)
             
             db_article = CompanyArticle(**filtered_article)
             session.add(db_article)

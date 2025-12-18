@@ -8,9 +8,10 @@ AIReport Main Entry Point
 
 import asyncio
 import argparse
-from crawler.scheduler import run_all_crawlers
-from crawler.advanced_scheduler import run_all_crawlers_concurrent
+from crawler.scheduler import run_all_crawlers, CrawlerScheduler
+from crawler import get_global_registry, CrawlerType
 from analysis.generator import ReportGenerator
+from analysis.gemini_agent import GeminiAIReportAgent
 from crawler import utils
 from database.db_session import init_db
 
@@ -27,6 +28,8 @@ async def main():
     parser.add_argument("--max-concurrent", type=int, default=3, help="Maximum concurrent crawlers (default: 3)")
     parser.add_argument("--no-incremental", action="store_true", help="Disable incremental updates")
     parser.add_argument("--use-proxy", action="store_true", help="Enable proxy pool")
+    parser.add_argument("--use-agent", action="store_true", help="Use GeminiAIReportAgent for intelligent report generation (recommended)")
+    parser.add_argument("--save-intermediate", action="store_true", help="Save intermediate results during agent processing")
     
     args = parser.parse_args()
 
@@ -42,70 +45,74 @@ async def main():
     if not args.skip_crawl:
         logger.info("Starting Crawler Phase...")
         
-        # 选择调度器：并发或串行
-        if args.concurrent:
-            logger.info(f"🚀 Using CONCURRENT scheduler (max: {args.max_concurrent})")
-            if args.crawler == "all":
-                await run_all_crawlers_concurrent(
-                    days=args.days,
-                    max_concurrent=args.max_concurrent,
-                    use_incremental=not args.no_incremental
-                )
-            else:
-                logger.warning("Concurrent mode only works with --crawler all. Using sequential mode.")
-                await run_single_crawler(args.crawler, args.days)
+        # 使用统一的调度器（支持并发和增量更新）
+        if args.crawler == "all":
+            # 并发模式默认启用
+            max_concurrent = args.max_concurrent if args.concurrent else 3
+            logger.info(f"🚀 Running all crawlers (max concurrent: {max_concurrent})")
+            await run_all_crawlers(
+                days=args.days,
+                max_concurrent=max_concurrent,
+                use_incremental=not args.no_incremental
+            )
         else:
-            logger.info("📝 Using SEQUENTIAL scheduler")
-            if args.crawler == "all":
-                await run_all_crawlers(days=args.days)
-            else:
-                await run_single_crawler(args.crawler, args.days)
+            # 运行单个爬虫
+            await run_single_crawler(args.crawler, args.days)
     
     if not args.skip_report:
         logger.info("Starting Analysis Phase...")
-        generator = ReportGenerator()
-        await generator.run(days=args.days)
+        
+        if args.use_agent:
+            # 使用智能 Agent 生成报告（推荐）
+            logger.info("🤖 使用 GeminiAIReportAgent 进行智能分析...")
+            try:
+                agent = GeminiAIReportAgent(max_retries=2)
+                await agent.run(days=args.days, save_intermediate=args.save_intermediate)
+            except Exception as e:
+                logger.error(f"Agent 运行失败: {e}")
+                logger.info("回退到基础报告生成器...")
+                generator = ReportGenerator()
+                await generator.run(days=args.days)
+        else:
+            # 使用基础报告生成器
+            logger.info("📝 使用基础报告生成器...")
+            generator = ReportGenerator()
+            await generator.run(days=args.days)
 
 
 async def run_single_crawler(crawler_name: str, days: int):
-    """运行单个爬虫"""
-    if crawler_name == "qbitai":
-        from crawler.qbitai_scraper import run_crawler
-        await run_crawler(days=days)
-    elif crawler_name == "openai":
-        from crawler.openai_scraper import run_openai_crawler
-        await run_openai_crawler(days=days)
-    elif crawler_name == "anthropic":
-        from crawler.anthropic_scraper import run_anthropic_crawler
-        await run_anthropic_crawler(days=days)
-    elif crawler_name == "google":
-        from crawler.google_ai_scraper import run_google_ai_crawler
-        await run_google_ai_crawler(days=days)
-    elif crawler_name == "china":
-        from crawler.china_ai_scraper import run_china_ai_crawler
-        await run_china_ai_crawler(days=days)
-    elif crawler_name == "meta":
-        from crawler.meta_microsoft_scraper import run_meta_microsoft_crawler
-        await run_meta_microsoft_crawler(days=days)
-    elif crawler_name == "microsoft":
-        from crawler.meta_microsoft_scraper import run_meta_microsoft_crawler
-        await run_meta_microsoft_crawler(days=days)
-    elif crawler_name == "jiqizhixin":
-        from crawler.news_scraper import run_jiqizhixin_crawler
-        await run_jiqizhixin_crawler(days=days)
-    elif crawler_name == "xinzhiyuan":
-        from crawler.news_scraper import run_xinzhiyuan_crawler
-        await run_xinzhiyuan_crawler(days=days)
-    elif crawler_name == "company":
-        from crawler.scheduler import CrawlerScheduler
+    """运行单个爬虫（使用动态加载）"""
+    registry = get_global_registry()
+    
+    # 特殊处理：按类型运行
+    if crawler_name == "company":
         scheduler = CrawlerScheduler(days=days)
-        await scheduler.run_company_crawlers()
+        await scheduler.run_crawlers_by_type(CrawlerType.COMPANY)
+        return
     elif crawler_name == "news":
-        from crawler.scheduler import CrawlerScheduler
         scheduler = CrawlerScheduler(days=days)
-        await scheduler.run_news_crawlers()
-    else:
+        await scheduler.run_crawlers_by_type(CrawlerType.NEWS)
+        return
+    elif crawler_name == "tools":
+        scheduler = CrawlerScheduler(days=days)
+        await scheduler.run_crawlers_by_type(CrawlerType.TOOLS)
+        return
+    
+    # 运行指定的单个爬虫
+    crawler_info = registry.get_crawler(crawler_name)
+    if not crawler_info:
         logger.error(f"Unknown crawler: {crawler_name}")
+        logger.info("Available crawlers:")
+        registry.list_crawlers()
+        return
+    
+    # 动态加载并运行爬虫
+    runner_func = registry.get_crawler_runner(crawler_name)
+    if runner_func:
+        logger.info(f"Running crawler: {crawler_info['name']}")
+        await runner_func(days=days)
+    else:
+        logger.error(f"No runner function found for crawler: {crawler_name}")
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 AI Companies Scraper
-AI公司官网爬虫（OpenAI, Anthropic, Google, Meta, Qwen, xAI, Microsoft, NVIDIA等）
+AI公司官网爬虫（保留可用的爬虫：NVIDIA）
 """
 
 import asyncio
@@ -22,245 +22,6 @@ from crawler import utils
 logger = utils.setup_logger()
 
 
-class OpenAIScraper(BaseWebScraper):
-    """OpenAI新闻爬虫"""
-    
-    def __init__(self):
-        super().__init__(
-            base_url="https://openai.com/news/",
-            company_name="openai"
-        )
-    
-    async def get_article_detail(self, article_id: str, url: str) -> Optional[Dict]:
-        """获取文章详情"""
-        return await get_generic_article_detail(self, article_id, url)
-    
-    async def get_article_list(self, article_type: str = 'news') -> List[Dict]:
-        """获取文章列表"""
-        try:
-            url = self.base_url
-            logger.info(f"Fetching OpenAI news list from {url}...")
-            
-            html = await self.fetch_page(url)
-            if not html:
-                return []
-            
-            soup = BeautifulSoup(html, 'html.parser')
-            articles = []
-            
-            # OpenAI使用特定的结构
-            article_elements = soup.find_all(['article', 'a'], href=lambda x: x and '/news/' in x)
-            
-            logger.info(f"Found {len(article_elements)} potential article elements")
-            
-            for elem in article_elements[:20]:
-                try:
-                    if elem.name == 'a':
-                        link_elem = elem
-                    else:
-                        link_elem = elem.find('a', href=True)
-                    
-                    if not link_elem:
-                        continue
-                    
-                    url = link_elem.get('href', '')
-                    if url.startswith('/'):
-                        url = 'https://openai.com' + url
-                    
-                    if '/news/' not in url or url == self.base_url:
-                        continue
-                    
-                    article_id = self.extract_article_id(url)
-                    if not article_id:
-                        continue
-                    
-                    title_elem = elem.find(['h1', 'h2', 'h3', 'h4'])
-                    if not title_elem:
-                        title_elem = link_elem
-                    title = self.clean_text(title_elem.get_text())
-                    
-                    if not title or len(title) < 5:
-                        continue
-                    
-                    articles.append({
-                        'article_id': f"openai_{article_id}",
-                        'title': title[:500],
-                        'url': url,
-                    })
-                    
-                except Exception as e:
-                    logger.debug(f"Failed to parse element: {e}")
-                    continue
-            
-            logger.info(f"Extracted {len(articles)} OpenAI articles")
-            return articles
-        
-        except Exception as e:
-            logger.error(f"Failed to get OpenAI article list: {e}")
-            return []
-
-
-class QwenScraper(BaseWebScraper):
-    """Qwen研究爬虫"""
-    
-    def __init__(self):
-        super().__init__(
-            base_url="https://qwen.ai/research",
-            company_name="qwen"
-        )
-    
-    async def get_article_detail(self, article_id: str, url: str) -> Optional[Dict]:
-        """获取文章详情"""
-        return await get_generic_article_detail(self, article_id, url)
-    
-    async def get_article_list(self, article_type: str = 'research') -> List[Dict]:
-        """获取文章列表"""
-        try:
-            logger.info(f"Fetching Qwen research list from {self.base_url}...")
-            
-            html = await self.fetch_page(self.base_url)
-            if not html:
-                return []
-            
-            soup = BeautifulSoup(html, 'html.parser')
-            articles = []
-            
-            # 查找文章元素
-            article_elements = soup.find_all(['article', 'div', 'li'], class_=lambda x: x and any(
-                keyword in str(x).lower() for keyword in ['research', 'paper', 'publication', 'article', 'card']
-            ))
-            
-            if not article_elements:
-                article_elements = soup.find_all('a', href=lambda x: x and 'research' in str(x).lower())
-            
-            logger.info(f"Found {len(article_elements)} potential article elements")
-            
-            for elem in article_elements[:20]:
-                try:
-                    if elem.name == 'a':
-                        link_elem = elem
-                    else:
-                        link_elem = elem.find('a', href=True)
-                    
-                    if not link_elem:
-                        continue
-                    
-                    url = link_elem.get('href', '')
-                    if url.startswith('/'):
-                        url = 'https://qwen.ai' + url
-                    elif not url.startswith('http'):
-                        continue
-                    
-                    article_id = self.extract_article_id(url)
-                    if not article_id:
-                        continue
-                    
-                    title_elem = elem.find(['h1', 'h2', 'h3', 'h4'])
-                    if not title_elem:
-                        title_elem = link_elem
-                    title = self.clean_text(title_elem.get_text())
-                    
-                    if not title or len(title) < 5:
-                        continue
-                    
-                    articles.append({
-                        'article_id': f"qwen_{article_id}",
-                        'title': title[:500],
-                        'url': url,
-                    })
-                    
-                except Exception as e:
-                    logger.debug(f"Failed to parse element: {e}")
-                    continue
-            
-            logger.info(f"Extracted {len(articles)} Qwen articles")
-            return articles
-        
-        except Exception as e:
-            logger.error(f"Failed to get Qwen article list: {e}")
-            return []
-
-
-class XAIScraper(BaseWebScraper):
-    """xAI (Grok)新闻爬虫"""
-    
-    def __init__(self):
-        super().__init__(
-            base_url="https://x.ai/news",
-            company_name="xai"
-        )
-    
-    async def get_article_detail(self, article_id: str, url: str) -> Optional[Dict]:
-        """获取文章详情"""
-        return await get_generic_article_detail(self, article_id, url)
-    
-    async def get_article_list(self, article_type: str = 'news') -> List[Dict]:
-        """获取文章列表"""
-        try:
-            logger.info(f"Fetching xAI news list from {self.base_url}...")
-            
-            html = await self.fetch_page(self.base_url)
-            if not html:
-                return []
-            
-            soup = BeautifulSoup(html, 'html.parser')
-            articles = []
-            
-            article_elements = soup.find_all(['article', 'div'], class_=lambda x: x and any(
-                keyword in str(x).lower() for keyword in ['news', 'post', 'article']
-            ))
-            
-            if not article_elements:
-                article_elements = soup.find_all('a', href=lambda x: x and '/news/' in str(x))
-            
-            logger.info(f"Found {len(article_elements)} potential article elements")
-            
-            for elem in article_elements[:20]:
-                try:
-                    if elem.name == 'a':
-                        link_elem = elem
-                    else:
-                        link_elem = elem.find('a', href=True)
-                    
-                    if not link_elem:
-                        continue
-                    
-                    url = link_elem.get('href', '')
-                    if url.startswith('/'):
-                        url = 'https://x.ai' + url
-                    elif not url.startswith('http'):
-                        continue
-                    
-                    article_id = self.extract_article_id(url)
-                    if not article_id:
-                        continue
-                    
-                    title_elem = elem.find(['h1', 'h2', 'h3', 'h4'])
-                    if not title_elem:
-                        title_elem = link_elem
-                    title = self.clean_text(title_elem.get_text())
-                    
-                    if not title or len(title) < 5:
-                        continue
-                    
-                    articles.append({
-                        'article_id': f"xai_{article_id}",
-                        'title': title[:500],
-                        'url': url,
-                    })
-                    
-                except Exception as e:
-                    logger.debug(f"Failed to parse element: {e}")
-                    continue
-            
-            logger.info(f"Extracted {len(articles)} xAI articles")
-            return articles
-        
-        except Exception as e:
-            logger.error(f"Failed to get xAI article list: {e}")
-            return []
-
-
 class NVIDIAScraper(BaseWebScraper):
     """NVIDIA新闻爬虫"""
     
@@ -274,7 +35,7 @@ class NVIDIAScraper(BaseWebScraper):
         """获取文章详情"""
         return await get_generic_article_detail(self, article_id, url)
     
-    async def get_article_list(self, article_type: str = 'news') -> List[Dict]:
+    async def get_article_list(self, page: int = 1) -> List[Dict]:
         """获取文章列表"""
         try:
             logger.info(f"Fetching NVIDIA news list from {self.base_url}...")
@@ -331,79 +92,6 @@ class NVIDIAScraper(BaseWebScraper):
         
         except Exception as e:
             logger.error(f"Failed to get NVIDIA article list: {e}")
-            return []
-
-
-class MicrosoftAIScraper(BaseWebScraper):
-    """Microsoft AI新闻爬虫"""
-    
-    def __init__(self):
-        super().__init__(
-            base_url="https://news.microsoft.com/source/topics/ai/",
-            company_name="microsoft"
-        )
-    
-    async def get_article_detail(self, article_id: str, url: str) -> Optional[Dict]:
-        """获取文章详情"""
-        return await get_generic_article_detail(self, article_id, url)
-    
-    async def get_article_list(self, article_type: str = 'news') -> List[Dict]:
-        """获取文章列表"""
-        try:
-            logger.info(f"Fetching Microsoft AI news list from {self.base_url}...")
-            
-            html = await self.fetch_page(self.base_url)
-            if not html:
-                return []
-            
-            soup = BeautifulSoup(html, 'html.parser')
-            articles = []
-            
-            article_elements = soup.find_all(['article', 'div'], class_=lambda x: x and any(
-                keyword in str(x).lower() for keyword in ['article', 'post', 'story']
-            ))
-            
-            logger.info(f"Found {len(article_elements)} potential article elements")
-            
-            for elem in article_elements[:20]:
-                try:
-                    link_elem = elem.find('a', href=True)
-                    if not link_elem:
-                        continue
-                    
-                    url = link_elem.get('href', '')
-                    if url.startswith('/'):
-                        url = 'https://news.microsoft.com' + url
-                    elif not url.startswith('http'):
-                        continue
-                    
-                    article_id = self.extract_article_id(url)
-                    if not article_id:
-                        continue
-                    
-                    title_elem = elem.find(['h1', 'h2', 'h3', 'h4'])
-                    if not title_elem:
-                        title_elem = link_elem
-                    title = self.clean_text(title_elem.get_text())
-                    
-                    if not title or len(title) < 5:
-                        continue
-                    
-                    articles.append({
-                        'article_id': f"microsoft_{article_id}",
-                        'title': title[:500],
-                        'url': url,
-                    })
-                    
-                except Exception as e:
-                    logger.debug(f"Failed to parse element: {e}")
-                    continue
-            
-            logger.info(f"Extracted {len(articles)} Microsoft AI articles")
-            return articles
-        
-        except Exception as e:
-            logger.error(f"Failed to get Microsoft AI article list: {e}")
             return []
 
 
@@ -519,7 +207,7 @@ async def save_company_article_to_db(article: Dict):
 
 if __name__ == "__main__":
     async def test():
-        scraper = QwenScraper()
+        scraper = NVIDIAScraper()
         await scraper.init()
         
         articles = await scraper.get_article_list()
@@ -533,4 +221,3 @@ if __name__ == "__main__":
         await scraper.close()
     
     asyncio.run(test())
-

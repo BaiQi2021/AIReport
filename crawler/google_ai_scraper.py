@@ -5,6 +5,7 @@ Google AI (DeepMind & Google Research) Scraper
 爬取Google AI、DeepMind的研究论文和博客
 """
 
+import asyncio
 import json
 from datetime import datetime
 from typing import Dict, List, Optional
