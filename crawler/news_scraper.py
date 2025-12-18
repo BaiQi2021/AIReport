@@ -172,8 +172,15 @@ class JiqizhixinScraper(BaseWebScraper):
             else:
                 time_str = time_elem.get_text(strip=True) if time_elem.name != 'meta' else time_elem.get('content')
             
-            article['publish_time'] = self.parse_timestamp(time_str) if time_str else utils.get_current_timestamp()
-            article['publish_date'] = datetime.fromtimestamp(article['publish_time']).strftime('%Y-%m-%d')
+            if not time_str:
+                logger.warning(f"Skip article {article_id}: missing publish time.")
+                return None
+            publish_ts = self.parse_timestamp(time_str)
+            if publish_ts is None:
+                logger.warning(f"Skip article {article_id}: cannot parse publish time: {time_str}")
+                return None
+            article['publish_time'] = publish_ts
+            article['publish_date'] = datetime.fromtimestamp(publish_ts).strftime('%Y-%m-%d')
             
             # 分类
             cat_elem = soup.find(class_=lambda x: x and 'category' in str(x).lower())

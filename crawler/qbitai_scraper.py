@@ -185,7 +185,11 @@ class QbitaiWebScraper:
             else:
                 time_str = time_elem.get_text(strip=True) if time_elem.name != 'meta' else time_elem.get('content')
             
-            article['publish_time'] = self._parse_timestamp(time_str)
+            publish_ts = self._parse_timestamp(time_str)
+            if publish_ts is None:
+                logger.warning(f"Skip article {article_id} due to missing/invalid publish time.")
+                return None
+            article['publish_time'] = publish_ts
             article['publish_date'] = datetime.fromtimestamp(article['publish_time']).strftime('%Y-%m-%d')
             
             # Category
@@ -366,10 +370,11 @@ class QbitaiWebScraper:
                 return match.group(1)
         return url.split('/')[-1].split('.')[0] if url else None
 
-    def _parse_timestamp(self, time_str: str) -> int:
+    def _parse_timestamp(self, time_str: str) -> Optional[int]:
         try:
             if not time_str:
-                return int(datetime.now().timestamp())
+                logger.warning("Publish time missing, skip article.")
+                return None
             
             time_str = time_str.strip()
             now = datetime.now()
@@ -409,9 +414,11 @@ class QbitaiWebScraper:
                 except:
                     pass
             
-            return int(now.timestamp())
+            logger.warning(f"Unrecognized publish time format: {time_str}")
+            return None
         except:
-            return int(datetime.now().timestamp())
+            logger.warning(f"Failed to parse publish time: {time_str}")
+            return None
 
 async def save_article_to_db(article: Dict):
     async with get_session() as session:

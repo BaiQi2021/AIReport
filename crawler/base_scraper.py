@@ -213,7 +213,7 @@ class BaseWebScraper(ABC):
         
         return None
     
-    def parse_timestamp(self, time_str: str) -> int:
+    def parse_timestamp(self, time_str: str) -> Optional[int]:
         """
         解析时间字符串为Unix时间戳
         
@@ -221,11 +221,12 @@ class BaseWebScraper(ABC):
             time_str: 时间字符串
             
         Returns:
-            Unix时间戳（秒）
+            Unix时间戳（秒）；无法解析时返回None
         """
         try:
             if not time_str:
-                return int(datetime.now().timestamp())
+                logger.warning("Publish time missing.")
+                return None
             
             time_str = time_str.strip()
             now = datetime.now()
@@ -287,11 +288,11 @@ class BaseWebScraper(ABC):
                     continue
             
             logger.warning(f"Failed to parse timestamp: {time_str}")
-            return int(now.timestamp())
+            return None
             
         except Exception as e:
             logger.error(f"Error parsing timestamp {time_str}: {e}")
-            return int(datetime.now().timestamp())
+            return None
     
     def extract_reference_links(self, soup: BeautifulSoup, content_elem: Optional[BeautifulSoup]) -> List[Dict]:
         """

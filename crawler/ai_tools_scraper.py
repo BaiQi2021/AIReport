@@ -204,19 +204,23 @@ class GenericBlogScraper(BaseWebScraper):
                     t in str(x).lower() for t in ['time', 'date', 'publish']
                 ))
             
+            publish_ts = None
             if time_elem:
                 time_str = time_elem.get('datetime', '') or time_elem.get_text(strip=True)
-                article['publish_time'] = self.parse_timestamp(time_str) if time_str else utils.get_current_timestamp()
+                publish_ts = self.parse_timestamp(time_str) if time_str else None
             else:
                 # 尝试从meta标签获取
                 time_meta = soup.find('meta', attrs={'property': 'article:published_time'})
                 if time_meta:
                     time_str = time_meta.get('content', '')
-                    article['publish_time'] = self.parse_timestamp(time_str) if time_str else utils.get_current_timestamp()
-                else:
-                    article['publish_time'] = utils.get_current_timestamp()
+                    publish_ts = self.parse_timestamp(time_str) if time_str else None
             
-            article['publish_date'] = datetime.fromtimestamp(article['publish_time']).strftime('%Y-%m-%d')
+            if publish_ts is None:
+                logger.warning(f"Skip article {article_id}: missing/invalid publish time.")
+                return None
+            
+            article['publish_time'] = publish_ts
+            article['publish_date'] = datetime.fromtimestamp(publish_ts).strftime('%Y-%m-%d')
             
             # 分类
             cat_elem = soup.find(['span', 'a'], class_=lambda x: x and 'categor' in str(x).lower())

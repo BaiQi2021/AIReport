@@ -633,9 +633,9 @@ class GeminiAIReportAgent:
                             
                             # 计算最终评分
                             item.final_score = (
-                                item.tech_impact * 0.5 +
-                                item.industry_scope * 0.3 +
-                                item.hype_score * 0.2
+                                item.tech_impact * 0.45 +
+                                item.industry_scope * 0.2 +
+                                item.hype_score * 0.35
                             )
                             
                             # 评级映射
@@ -697,6 +697,16 @@ class GeminiAIReportAgent:
         for item in news_items:
             news_by_level[item.ranking_level].append(item)
         
+        # 计算覆盖日期范围（用于提示模型正确填写头部区间）
+        publish_times = [item.publish_time for item in news_items if item.publish_time]
+        if publish_times:
+            date_range_start = datetime.fromtimestamp(min(publish_times)).strftime('%Y-%m-%d')
+            date_range_end = datetime.fromtimestamp(max(publish_times)).strftime('%Y-%m-%d')
+        else:
+            today_str = datetime.now().strftime('%Y-%m-%d')
+            date_range_start = today_str
+            date_range_end = today_str
+
         # 格式化新闻数据
         formatted_news = ""
         for level in ["S", "A", "B", "C"]:
@@ -731,6 +741,7 @@ class GeminiAIReportAgent:
         prompt = f"""你是一个专业的AI前沿科技分析师。请根据以下经过筛选、归类、去重和排序的新闻数据，编写一份高质量的AI前沿动态速报。
 
 **当前日期**: {today_str}
+**报告覆盖日期范围（务必用于文首括号区间）**: {date_range_start} 至 {date_range_end}
 
 **报告模板和要求:**
 {template_content}
