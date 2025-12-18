@@ -5,6 +5,7 @@ OpenAI Research & News Scraper
 爬取OpenAI官网的研究论文和新闻
 """
 
+import asyncio
 import json
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -278,46 +279,72 @@ async def run_openai_crawler(days: int = 7):
     scraper = OpenAIScraper()
     await scraper.init()
     
+    blog_saved_count = 0
+    research_saved_count = 0
+    blog_fetch_failed = False
+    research_fetch_failed = False
+    
     try:
         # 爬取博客文章
         logger.info("Fetching OpenAI blog articles...")
         blog_articles = await scraper.get_article_list(article_type='blog')
         
-        for article_item in blog_articles[:20]:  # 限制数量
-            try:
-                article = await scraper.get_article_detail(
-                    article_item['article_id'],
-                    article_item['url']
-                )
-                
-                if article:
-                    await save_company_article_to_db(article)
-                
-                await asyncio.sleep(2)  # 礼貌延迟
-                
-            except Exception as e:
-                logger.error(f"Error processing OpenAI blog article: {e}")
-                continue
+        if not blog_articles:
+            logger.warning("⚠️  OpenAI blog: Failed to fetch article list (may be blocked or page structure changed)")
+            blog_fetch_failed = True
+        else:
+            logger.info(f"Found {len(blog_articles)} blog articles")
+            for article_item in blog_articles[:20]:  # 限制数量
+                try:
+                    article = await scraper.get_article_detail(
+                        article_item['article_id'],
+                        article_item['url']
+                    )
+                    
+                    if article:
+                        await save_company_article_to_db(article)
+                        blog_saved_count += 1
+                    
+                    await asyncio.sleep(2)  # 礼貌延迟
+                    
+                except Exception as e:
+                    logger.error(f"Error processing OpenAI blog article: {e}")
+                    continue
         
         # 爬取研究文章
         logger.info("Fetching OpenAI research articles...")
         research_articles = await scraper.get_article_list(article_type='research')
         
-        for article_item in research_articles[:20]:  # 限制数量
-            try:
-                article = await scraper.get_article_detail(
-                    article_item['article_id'],
-                    article_item['url']
-                )
-                
-                if article:
-                    await save_company_article_to_db(article)
-                
-                await asyncio.sleep(2)  # 礼貌延迟
-                
-            except Exception as e:
-                logger.error(f"Error processing OpenAI research article: {e}")
-                continue
+        if not research_articles:
+            logger.warning("⚠️  OpenAI research: Failed to fetch article list (may be blocked or page structure changed)")
+            research_fetch_failed = True
+        else:
+            logger.info(f"Found {len(research_articles)} research articles")
+            for article_item in research_articles[:20]:  # 限制数量
+                try:
+                    article = await scraper.get_article_detail(
+                        article_item['article_id'],
+                        article_item['url']
+                    )
+                    
+                    if article:
+                        await save_company_article_to_db(article)
+                        research_saved_count += 1
+                    
+                    await asyncio.sleep(2)  # 礼貌延迟
+                    
+                except Exception as e:
+                    logger.error(f"Error processing OpenAI research article: {e}")
+                    continue
+        
+        # 总结统计
+        total_saved = blog_saved_count + research_saved_count
+        if blog_fetch_failed and research_fetch_failed:
+            logger.warning("⚠️  OpenAI Crawler: Both blog and research pages failed to fetch. No articles saved.")
+        elif blog_fetch_failed or research_fetch_failed:
+            logger.warning(f"⚠️  OpenAI Crawler: Partial failure. Saved {total_saved} articles (blog: {blog_saved_count}, research: {research_saved_count})")
+        else:
+            logger.info(f"✅ OpenAI Crawler: Successfully saved {total_saved} articles (blog: {blog_saved_count}, research: {research_saved_count})")
         
     finally:
         await scraper.close()
