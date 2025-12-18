@@ -144,9 +144,22 @@ class QbitaiWebScraper:
                 'url': url,
             }
             
-            # Title
-            title_elem = soup.find(['h1', 'h2'], class_=re.compile(r'title', re.I))
-            article['title'] = title_elem.get_text(strip=True) if title_elem else ''
+            # Title - 优先查找第一个h1标签（量子位的标题没有特定class）
+            title_elem = soup.find('h1')
+            if not title_elem:
+                # 后备方案：查找包含title类的标题
+                title_elem = soup.find(['h1', 'h2'], class_=re.compile(r'title', re.I))
+            if not title_elem:
+                # 最后尝试从title标签提取
+                title_tag = soup.find('title')
+                if title_tag:
+                    title_text = title_tag.get_text(strip=True)
+                    # 移除网站名称（如" | 量子位"）
+                    article['title'] = title_text.split('|')[0].strip()
+                else:
+                    article['title'] = ''
+            else:
+                article['title'] = title_elem.get_text(strip=True)
             
             # Content
             content_elem = soup.find(class_=re.compile(r'content|article-body|main', re.I))
@@ -427,7 +440,7 @@ async def save_article_to_db(article: Dict):
             session.add(db_article)
             logger.info(f"Saved new article: {article_id}")
         
-        await session.commit()
+        # 移除手动 commit，让上下文管理器自动处理
 
 async def save_comment_to_db(comment: Dict):
     async with get_session() as session:
@@ -455,8 +468,9 @@ async def run_crawler(days=3):
     logger.info("🚀 QbitAI Crawler Started")
     logger.info("=" * 60)
     
+    # 设置日期范围：从 N 天前的零点到现在
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=days)
+    start_date = (datetime.now() - timedelta(days=days)).replace(hour=0, minute=0, second=0, microsecond=0)
     logger.info(f"Date range: {start_date.date()} to {end_date.date()}")
     
     scraper = QbitaiWebScraper()
@@ -464,42 +478,73 @@ async def run_crawler(days=3):
     
     try:
         page = 1
-        while True:
+        seen_article_ids = set()  # 跟踪已处理的文章ID，避免重复
+        consecutive_old_articles = 0  # 连续遇到过期文章的计数
+        max_pages = 10  # 最大页数限制，防止无限循环
+        
+        while page <= max_pages:
             articles = await scraper.get_article_list(page=page)
             if not articles:
+                logger.info("No more articles found.")
+                break
+            
+            # 检测重复页面：如果当前页所有文章都已处理过，说明遇到了重复页面
+            current_page_article_ids = {art['article_id'] for art in articles}
+            if current_page_article_ids.issubset(seen_article_ids):
+                logger.warning(f"Page {page} contains only duplicate articles. Stopping crawler.")
                 break
             
             should_continue = True
+            new_articles_in_page = 0
+            
             for article_item in articles:
+                article_id = article_item['article_id']
+                
+                # 跳过已处理的文章
+                if article_id in seen_article_ids:
+                    continue
+                
+                seen_article_ids.add(article_id)
+                
                 try:
                     article = await scraper.get_article_detail(
-                        article_item['article_id'],
+                        article_id,
                         article_item['url']
                     )
                     
                     if not article:
-                        logger.warning(f"Skipping article {article_item['article_id']} - failed to fetch details")
+                        logger.warning(f"Skipping article {article_id} - failed to fetch details")
                         continue
                     
                     article_date = article.get('publish_date')
-                    # Simple string comparison for date
+                    
+                    # 检查日期是否在范围内
                     if article_date < str(start_date.date()):
-                        logger.info(f"Article date {article_date} out of range. Stopping.")
-                        should_continue = False
-                        break
+                        logger.info(f"Article {article_id} date {article_date} is out of range.")
+                        consecutive_old_articles += 1
+                        # 如果连续遇到5篇过期文章，停止爬取
+                        if consecutive_old_articles >= 5:
+                            logger.info(f"Found {consecutive_old_articles} consecutive old articles. Stopping.")
+                            should_continue = False
+                            break
+                        continue
+                    else:
+                        # 重置计数器
+                        consecutive_old_articles = 0
+                        new_articles_in_page += 1
                     
                     await save_article_to_db(article)
                     
                     # Comments (optional, don't fail if comments fail)
                     try:
-                        comments = await scraper.get_comments(article_item['article_id'], article_item['url'])
+                        comments = await scraper.get_comments(article_id, article_item['url'])
                         for comment in comments:
                             try:
                                 await save_comment_to_db(comment)
                             except Exception as e:
                                 logger.warning(f"Failed to save comment: {e}")
                     except Exception as e:
-                        logger.warning(f"Failed to get comments for {article_item['article_id']}: {e}")
+                        logger.warning(f"Failed to get comments for {article_id}: {e}")
                     
                     await asyncio.sleep(1)
                         
@@ -508,8 +553,15 @@ async def run_crawler(days=3):
                     continue  # Continue with next article
             
             if not should_continue:
+                logger.info("Stop condition met. Exiting crawler.")
                 break
-                
+            
+            # 如果这一页没有新文章，也停止
+            if new_articles_in_page == 0:
+                logger.info(f"No new articles found on page {page}. Stopping.")
+                break
+            
+            logger.info(f"Page {page} completed: {new_articles_in_page} new articles processed.")
             page += 1
             await asyncio.sleep(2)
             
