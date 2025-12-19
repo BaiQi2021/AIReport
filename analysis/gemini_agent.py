@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 GeminiAIReportAgent - 智能新闻处理Agent
 实现：过滤 -> 归类 -> 去重 -> 排序 -> 报告生成 的多轮流程
@@ -33,7 +31,7 @@ class NewsItem:
         self.article_id = article_id
         self.title = title
         self.description = description
-        self.content = content[:1000]  # 限制内容长度
+        self.content = content  # 保存完整内容，在具体使用时再按需截取
         self.url = url
         self.source = source  # 来源：qbitai, openai, google等
         self.publish_time = publish_time
@@ -80,7 +78,7 @@ class NewsItem:
 class GeminiAIReportAgent:
     """基于 Gemini 的智能报告生成 Agent"""
     
-    def __init__(self, max_retries: int = 3):
+    def __init__(self, max_retries: int = 5):
         """
         初始化 Agent
         
@@ -89,7 +87,7 @@ class GeminiAIReportAgent:
         """
         self.api_key = settings.REPORT_ENGINE_API_KEY
         self.base_url = settings.REPORT_ENGINE_BASE_URL
-        self.model_name = settings.REPORT_ENGINE_MODEL_NAME or "gemini-2.0-flash-exp"
+        self.model_name = settings.REPORT_ENGINE_MODEL_NAME or "gemini-3-pro-preview"
         self.max_retries = max_retries
         
         if not self.api_key:
@@ -236,6 +234,19 @@ class GeminiAIReportAgent:
         """
         logger.info("=" * 60)
         logger.info("【第一步】开始过滤 (Filtering)...")
+
+        # 1. 预过滤：剔除内容过短或无内容的新闻
+        valid_news_items = []
+        for item in news_items:
+            # 简单的规则过滤：内容长度少于100字符视为无效内容
+            # 注意：NewsItem 初始化时已截取前1000字符，这里判断的是截取后的长度
+            # 但如果原内容本身就很少，这里也能检测出来
+            if item.content and len(item.content.strip()) >= 50:
+                valid_news_items.append(item)
+            else:
+                logger.info(f"预过滤剔除（内容过少）: {item.title} (ID: {item.article_id})")
+        
+        news_items = valid_news_items
         logger.info(f"待处理新闻数: {len(news_items)}, 批处理大小: {batch_size}")
         
         filtered_items = []
@@ -633,9 +644,9 @@ class GeminiAIReportAgent:
                             
                             # 计算最终评分
                             item.final_score = (
-                                item.tech_impact * 0.45 +
-                                item.industry_scope * 0.2 +
-                                item.hype_score * 0.35
+                                item.tech_impact * 0.5 +
+                                item.industry_scope * 0.3 +
+                                item.hype_score * 0.2
                             )
                             
                             # 评级映射
@@ -666,7 +677,293 @@ class GeminiAIReportAgent:
         
         return news_items
     
-    def generate_final_report(self, news_items: List[NewsItem], quality_check: bool = True) -> Optional[str]:
+    def _validate_news_item_format(self, content: str) -> Tuple[bool, str]:
+        """验证新闻条目的 Markdown 格式"""
+        required_patterns = [
+            (r"### \*\*.*?\*\*", "标题格式错误，应为 ### **标题**"),
+            (r"\[阅读原文\]\(.*?\)", "缺少阅读原文链接或格式错误"),
+            (r"> \*\*概要\*\*:.*", "缺少概要或格式错误"),
+            (r"\*\*💡内容详解\*\*", "缺少'💡内容详解'分节"),
+            (r"- \*\*.*?\*\*", "缺少要点标题或格式错误")
+        ]
+        
+        import re
+        for pattern, error_msg in required_patterns:
+            if not re.search(pattern, content, re.MULTILINE):
+                return False, error_msg
+        return True, ""
+
+    async def _generate_news_entries_batch(self, batch_items: List[NewsItem]) -> List[Dict[str, str]]:
+        """
+        分批生成新闻条目内容 (并发处理)
+        
+        Args:
+            batch_items: 这一批的新闻列表
+            
+        Returns:
+            生成的条目列表，每项包含 {"article_id", "category", "markdown_content"}
+        """
+        batch_data = []
+        for item in batch_items:
+            pub_date = datetime.fromtimestamp(item.publish_time).strftime('%Y-%m-%d %H:%M')
+            batch_data.append({
+                "article_id": item.article_id,
+                "title": item.title,
+                "source": item.source,
+                "url": item.url,
+                "publish_time": pub_date,
+                "content": item.content,  # 使用完整内容进行深度阅读
+            })
+
+        prompt = f"""你是一个专业的AI技术分析师。请为以下新闻生成符合报告格式的Markdown内容块。
+
+**输出要求：**
+对于每一条新闻，请执行以下操作：
+1. **分类**：将其归入以下三类之一：
+   - "Infrastructure" (AI基础设施: 芯片, 算力, 框架, 数据工程等)
+   - "Model" (AI模型与技术: 基础模型, 算法创新, 训练技术等)
+   - "Application" (AI应用与智能体: 具体应用, Agent, 行业落地等)
+
+2. **生成Markdown内容**：严格遵循以下Markdown格式模板生成内容。
+   
+   **模板格式：**
+   ```markdown
+   ### **[新闻标题]**
+   
+   [阅读原文]([URL])  `[Publish_Time]`
+   
+   > **概要**: [3-4句话简练概括核心事件]
+   
+   **💡内容详解**
+   (内容详解是对关键技术的罗列，关键点数量至少大于3点，请对关键技术进行详细解读，此处不用添加概述)
+
+    - **关键点大标题 1**
+    （需要详细对关键点进行解释，关键点解释的数量根据要点动态调整）
+        - [关键点解释1]
+        详细解释该技术，不超过200字
+        - [关键点解释2]
+        详细解释该技术，不超过200字
+        ……
+
+    - **关键点大标题 2**
+    （需要详细对关键点进行解释，关键点解释的数量根据要点动态调整）
+        - [关键点解释1]
+        详细解释该技术，不超过200字
+        - [关键点解释2]
+        详细解释该技术，不超过200字
+        ……
+
+    - **关键点大标题 3**
+    （需要详细对关键点进行解释，关键点解释的数量根据要点动态调整）
+        - [关键点解释1]
+        详细解释该技术，不超过200字
+        - [关键点解释2]
+        详细解释该技术，不超过200字
+        ……
+    ……
+   ```
+
+**新闻数据：**
+```json
+{json.dumps(batch_data, ensure_ascii=False, indent=2)}
+```
+
+**返回格式：**
+请返回一个 JSON 数组，包含每条新闻的生成结果：
+```json
+[
+  {{
+    "article_id": "xxx",
+    "category": "Infrastructure", 
+    "markdown_content": "### **标题**..."
+  }},
+  ...
+]
+```
+请只返回 JSON。
+"""
+        
+        for retry in range(self.max_retries):
+            response = self._call_llm(prompt, temperature=0.3)
+            results = self._parse_json_response(response)
+            if results:
+                # 验证格式
+                valid_results = []
+                errors = []
+                for item in results:
+                    is_valid, error = self._validate_news_item_format(item.get("markdown_content", ""))
+                    if is_valid:
+                        valid_results.append(item)
+                    else:
+                        errors.append(f"文章 '{item.get('title', 'Unknown')}' 格式错误: {error}")
+                
+                if not errors:
+                    return valid_results
+                
+                # 如果有错误且还有重试次数，将错误加入 prompt 重试
+                logger.warning(f"批次生成存在格式错误: {'; '.join(errors)}")
+                if retry < self.max_retries - 1:
+                    prompt += f"\n\n**修正要求**: 上次生成存在以下格式错误，请严格修正，确保Markdown格式完全符合模板：\n" + "\n".join(errors)
+                    continue
+                else:
+                    # 最后一次重试，仅返回有效的
+                    return valid_results
+            
+            await asyncio.sleep(1)
+            
+        return []
+
+    async def generate_final_report(self, news_items: List[NewsItem], quality_check: bool = True) -> Optional[str]:
+        """
+        生成最终报告 (多轮生成模式)
+        
+        Args:
+            news_items: 排序后的新闻列表
+            quality_check: 是否进行质量检查
+            
+        Returns:
+            报告内容
+        """
+        logger.info("=" * 60)
+        logger.info("【第五步】生成最终报告 (多轮生成模式)...")
+        
+        if not news_items:
+            logger.warning("没有新闻可以生成报告")
+            return None
+
+        # 1. 准备数据：筛选 S/A/B 级新闻进入正文
+        valid_items = [item for item in news_items if item.ranking_level in ["S", "A", "B"]]
+        # 如果 S/A/B 太少，考虑把 C 级的前几名加进来
+        if len(valid_items) < 5:
+             c_items = [item for item in news_items if item.ranking_level == "C"]
+             valid_items.extend(c_items[:5])
+        
+        # 确保按分数排序
+        valid_items.sort(key=lambda x: x.final_score, reverse=True)
+        
+        logger.info(f"将为 {len(valid_items)} 条高价值新闻生成详细报告")
+
+        # 2. 分批生成内容 (Batch Processing)
+        batch_size = 5
+        generated_entries = []
+        
+        for i in range(0, len(valid_items), batch_size):
+            batch = valid_items[i:i + batch_size]
+            logger.info(f"正在生成报告详情：批次 {i // batch_size + 1} (共 {len(batch)} 条)")
+            
+            # 并发生成该批次的内容
+            entries = await self._generate_news_entries_batch(batch)
+            if entries:
+                generated_entries.extend(entries)
+            else:
+                logger.error(f"批次 {i // batch_size + 1} 生成失败")
+
+        # 3. 组织内容
+        # 建立 article_id 到 news_item 的映射，方便获取额外信息
+        item_map = {item.article_id: item for item in valid_items}
+        
+        category_map = {
+            "Infrastructure": [],
+            "Model": [],
+            "Application": []
+        }
+        
+        for entry in generated_entries:
+            cat = entry.get("category", "Model")
+            if cat not in category_map:
+                cat = "Model"  # Fallback
+            category_map[cat].append(entry.get("markdown_content", ""))
+
+        # 4. 生成“本期速览” (Top 10)
+        top_items = valid_items[:10]
+        overview_prompt = f"""请为以下新闻生成“本期速览”列表。
+要求：
+- 每条新闻用一行 Markdown 列表项表示。
+- 格式：* **[[标签]]** [**新闻标题**]: [1-2句话核心看点]
+- 标签示例：[大模型], [芯片], [应用]等
+- 必须严格遵守上述格式，不要添加其他内容。
+
+新闻数据：
+{json.dumps([{"title": item.title, "description": item.description} for item in top_items], ensure_ascii=False, indent=2)}
+
+请直接返回 Markdown 列表。
+"""
+        overview_content = self._call_llm(overview_prompt) or "生成失败"
+        
+        # 简单验证概览格式
+        if "**[[" not in overview_content:
+             logger.warning("概览格式可能不符合要求，尝试修复...")
+             # 简单的重试逻辑
+             overview_prompt += "\n\n**修正要求**: 上次生成格式不正确。请确保每行以 '* **[[标签]]**' 开头。"
+             retry_content = self._call_llm(overview_prompt)
+             if retry_content and "**[[" in retry_content:
+                 overview_content = retry_content
+
+        # 5. 生成“拓展阅读” (Reference Links)
+        # 这里收集所有新闻（包括 C 级）的参考链接
+        reference_section = ""
+        all_ref_links = []
+        seen_urls = set()
+        
+        for item in news_items:
+            if item.reference_links:
+                try:
+                    refs = json.loads(item.reference_links)
+                    for ref in refs:
+                        if ref['url'] not in seen_urls:
+                            all_ref_links.append(f"* [{ref['title']}]({ref['url']})")
+                            seen_urls.add(ref['url'])
+                except:
+                    pass
+        
+        if all_ref_links:
+            reference_section = "\\n".join(all_ref_links[:30]) # 限制数量防止过长
+
+        # 6. 最终组装
+        publish_times = [item.publish_time for item in news_items if item.publish_time]
+        if publish_times:
+            date_range_start = datetime.fromtimestamp(min(publish_times)).strftime('%Y-%m-%d')
+            date_range_end = datetime.fromtimestamp(max(publish_times)).strftime('%Y-%m-%d')
+        else:
+            today_str = datetime.now().strftime('%Y-%m-%d')
+            date_range_start = today_str
+            date_range_end = today_str
+
+        final_report = f"""# AI 前沿动态速报 ({date_range_start} 至 {date_range_end})
+
+## ⚡ 本期速览
+
+{overview_content}
+
+---
+
+## 1. AI 基础设施
+
+{chr(10).join(category_map["Infrastructure"]) if category_map["Infrastructure"] else "*(本期无相关内容)*"}
+
+---
+
+## 2. AI 模型与技术
+
+{chr(10).join(category_map["Model"]) if category_map["Model"] else "*(本期无相关内容)*"}
+
+---
+
+## 3. AI 应用与智能体
+
+{chr(10).join(category_map["Application"]) if category_map["Application"] else "*(本期无相关内容)*"}
+
+---
+
+## 拓展阅读
+
+*(精选相关论文与原始链接)*
+
+{reference_section}
+"""
+        return final_report
+
+    def generate_final_report_old(self, news_items: List[NewsItem], quality_check: bool = True) -> Optional[str]:
         """
         生成最终报告
         
@@ -753,7 +1050,7 @@ class GeminiAIReportAgent:
 1. 严格遵循模板格式，一级标题和二级标题必须与模板一致
 2. 新闻已按 S/A/B/C 级别排序，优先关注 S 级和 A 级新闻
 3. 深度解读部分要有实质内容，结合技术背景和行业影响进行分析
-4. 如果新闻数据中提供了"原始来源"，标题链接必须使用原始来源URL
+4. 如果新闻数据中提供了"原始来源"，阅读原文的链接必须使用原始来源URL，禁止使用量子位自身链接
 5. Source 字段优先填写原始来源名称（如 OpenAI, arXiv 等）
 6. 语言风格要专业、客观、有洞察力
 7. 输出必须是 Markdown 格式
@@ -858,7 +1155,7 @@ class GeminiAIReportAgent:
             self._save_intermediate_results(news_items, "04_ranked")
         
         # 6. 生成报告
-        report_content = self.generate_final_report(news_items, quality_check=True)
+        report_content = await self.generate_final_report(news_items, quality_check=True)
         
         if report_content:
             # 保存最终报告

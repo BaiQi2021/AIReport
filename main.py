@@ -10,7 +10,6 @@ import asyncio
 import argparse
 from crawler.scheduler import run_all_crawlers, CrawlerScheduler
 from crawler import get_global_registry, CrawlerType
-from analysis.generator import ReportGenerator
 from analysis.gemini_agent import GeminiAIReportAgent
 from crawler import utils
 from database.db_session import init_db
@@ -28,7 +27,7 @@ async def main():
     parser.add_argument("--max-concurrent", type=int, default=3, help="Maximum concurrent crawlers (default: 3)")
     parser.add_argument("--no-incremental", action="store_true", help="Disable incremental updates")
     parser.add_argument("--use-proxy", action="store_true", help="Enable proxy pool")
-    parser.add_argument("--use-agent", action="store_true", help="Use GeminiAIReportAgent for intelligent report generation (recommended)")
+    parser.add_argument("--use-agent", action="store_true", help="Deprecated: Agent is now enabled by default")
     parser.add_argument("--save-intermediate", action="store_true", help="Save intermediate results during agent processing")
     
     args = parser.parse_args()
@@ -62,22 +61,13 @@ async def main():
     if not args.skip_report:
         logger.info("Starting Analysis Phase...")
         
-        if args.use_agent:
-            # 使用智能 Agent 生成报告（推荐）
-            logger.info("🤖 使用 GeminiAIReportAgent 进行智能分析...")
-            try:
-                agent = GeminiAIReportAgent(max_retries=2)
-                await agent.run(days=args.days, save_intermediate=args.save_intermediate)
-            except Exception as e:
-                logger.error(f"Agent 运行失败: {e}")
-                logger.info("回退到基础报告生成器...")
-                generator = ReportGenerator()
-                await generator.run(days=args.days)
-        else:
-            # 使用基础报告生成器
-            logger.info("📝 使用基础报告生成器...")
-            generator = ReportGenerator()
-            await generator.run(days=args.days)
+        # 使用智能 Agent 生成报告
+        logger.info("🤖 使用 GeminiAIReportAgent 进行智能分析...")
+        try:
+            agent = GeminiAIReportAgent(max_retries=2)
+            await agent.run(days=args.days, save_intermediate=args.save_intermediate)
+        except Exception as e:
+            logger.error(f"Agent 运行失败: {e}")
 
 
 async def run_single_crawler(crawler_name: str, days: int):
