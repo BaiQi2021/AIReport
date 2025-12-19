@@ -983,7 +983,7 @@ all:"Large Language Model" AND all:Reasoning
                 ("paper", 75),          # 论文
                 ("announcement", 70),   # 公告
                 ("external", 50),       # 外部链接
-                ("social", 10),         # 社交媒体
+                ("social", 20),         # 社交媒体
             ]
             
             # 根据 URL 特征和 type 字段判断优先级
@@ -1581,7 +1581,6 @@ all:"Large Language Model" AND all:Reasoning
             final_list.extend(arxiv_candidates[take_arxiv : take_arxiv + rest_slots])
             
         # 6.4 按标签分组输出
-        from collections import defaultdict
         grouped_links = defaultdict(list)
         for item in final_list:
             grouped_links[item['tag']].append(item['markdown'])
