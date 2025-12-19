@@ -944,6 +944,252 @@ all:"Large Language Model" AND all:Reasoning
                 return False, error_msg
         return True, ""
 
+    def _get_primary_source_url(self, item: NewsItem) -> str:
+        """
+        获取优先级最高的信源 URL
+        
+        优先级顺序：
+        1. 官方核心信源 (official, blog, github 等)
+        2. arXiv 论文
+        3. 权威技术媒体
+        4. 原始新闻 URL (兜底)
+        
+        Args:
+            item: 新闻条目
+            
+        Returns:
+            优先级最高的 URL
+        """
+        # 如果新闻本身来自官方源（非量子位等二手媒体），直接返回
+        non_official_sources = ["量子位", "qbitai", "36kr", "机器之心", "新智元"]
+        if item.source and not any(s.lower() in item.source.lower() for s in non_official_sources):
+            return item.url
+        
+        # 尝试从 reference_links 中选择最佳链接
+        if not item.reference_links:
+            return item.url
+            
+        try:
+            refs = json.loads(item.reference_links)
+            if not refs:
+                return item.url
+            
+            # 定义信源优先级
+            priority_order = [
+                ("official", 100),      # 官方发布
+                ("blog", 90),           # 官方博客
+                ("github", 85),         # GitHub Release
+                ("arxiv", 80),          # arXiv 论文
+                ("paper", 75),          # 论文
+                ("announcement", 70),   # 公告
+                ("external", 50),       # 外部链接
+                ("social", 10),         # 社交媒体
+            ]
+            
+            # 根据 URL 特征和 type 字段判断优先级
+            def get_priority(ref: dict) -> int:
+                url = ref.get("url", "").lower()
+                ref_type = ref.get("type", "").lower()
+                
+                # 根据 URL 域名判断
+                if any(domain in url for domain in ["openai.com", "blog.google", "ai.meta.com", "anthropic.com", "deepmind.google"]):
+                    return 100  # 官方核心域名最高优先级
+                if "arxiv.org" in url:
+                    return 80
+                if "github.com" in url:
+                    return 85
+                    
+                # 根据 type 字段判断
+                for ptype, score in priority_order:
+                    if ptype in ref_type:
+                        return score
+                        
+                return 30  # 默认低优先级
+            
+            # 按优先级排序并返回最高的
+            sorted_refs = sorted(refs, key=get_priority, reverse=True)
+            best_ref = sorted_refs[0]
+            
+            # 只有当最佳链接优先级高于默认时才使用
+            if get_priority(best_ref) >= 50:
+                return best_ref.get("url", item.url)
+                
+        except Exception as e:
+            logger.warning(f"解析 reference_links 失败: {e}")
+        
+        return item.url
+
+    async def _generate_event_entries_batch(self, batch_events: List[Dict], candidate_papers: List[Dict] = None) -> List[Dict[str, str]]:
+        """
+        按事件生成报告条目（每个事件综合其下所有新闻）
+        
+        Args:
+            batch_events: 事件列表，每个事件包含 {"event_id", "best_item", "all_items", "event_score"}
+            candidate_papers: 候选 arXiv 论文列表
+            
+        Returns:
+            生成的条目列表，每项包含 {"event_id", "category", "markdown_content"}
+        """
+        batch_data = []
+        for event in batch_events:
+            event_id = event["event_id"]
+            all_items = event["all_items"]  # 该事件下的所有新闻（去重后保留的，最多3条）
+            best_item = event["best_item"]
+            
+            # 获取优先级最高的官方信源 URL（从最佳新闻中获取）
+            primary_url = self._get_primary_source_url(best_item)
+            
+            # 综合所有新闻的内容
+            combined_content = ""
+            sources_info = []
+            for idx, item in enumerate(all_items, 1):
+                item_url = self._get_primary_source_url(item)
+                sources_info.append({
+                    "source": item.source,
+                    "url": item_url,
+                    "title": item.title
+                })
+                combined_content += f"\n--- 来源 {idx}: {item.source} ---\n"
+                combined_content += f"标题: {item.title}\n"
+                combined_content += f"内容: {item.content}\n"
+            
+            pub_date = datetime.fromtimestamp(best_item.publish_time).strftime('%Y-%m-%d %H:%M')
+            
+            batch_data.append({
+                "event_id": event_id,
+                "primary_title": best_item.title,  # 使用最高分新闻的标题作为主标题
+                "primary_url": primary_url,  # 使用优先级最高的官方信源
+                "primary_source": best_item.source,
+                "publish_time": pub_date,
+                "news_count": len(all_items),
+                "combined_content": combined_content,  # 综合所有新闻的内容
+                "all_sources": sources_info  # 所有来源信息
+            })
+
+        # 构建候选论文上下文
+        papers_context = ""
+        if candidate_papers:
+            papers_list = []
+            for p in candidate_papers:
+                papers_list.append(f"- Title: {p.get('title')}\n  URL: {p.get('url')}")
+            papers_context = "\n".join(papers_list)
+
+        prompt = f"""你是一个专业的AI技术分析师。请为以下**事件**生成符合报告格式的Markdown内容块。
+
+**重要说明：**
+- 每个事件可能包含多条来自不同来源的新闻报道
+- 请综合所有来源的信息，生成一个完整、不重复的事件报告
+- 优先使用官方来源的信息，辅以其他来源的补充细节
+
+**候选 arXiv 论文库：**
+{papers_context if papers_context else "(无候选论文)"}
+
+**输出要求：**
+对于每一个事件，请执行以下操作：
+1. **分类**：将其归入以下三类之一：
+   - "Infrastructure" (AI基础设施: 芯片, 算力, 框架, 数据工程等)
+   - "Model" (AI模型与技术: 基础模型, 算法创新, 训练技术等)
+   - "Application" (AI应用与智能体: 具体应用, Agent, 行业落地等)
+
+2. **生成Markdown内容**：严格遵循以下Markdown格式模板生成内容。
+   
+   **模板格式：**
+   ```markdown
+   ### **[事件标题 - 基于主标题优化]**
+   
+   [阅读原文]([primary_url])  `[Publish_Time]`
+   
+   > **概要**: [综合多个来源，用3-4句话简练概括核心事件]
+   
+   **💡内容详解**
+   (综合所有来源的信息，提炼关键技术点，关键点数量至少大于3点)
+
+    - **关键点大标题 1**
+    （需要详细对关键点进行解释，关键点解释的数量根据要点动态调整）
+        - **关键点解释1**
+        （另起一段详细解释该技术，要有具体技术细节，不超过200字）
+        - **关键点解释2**
+        （另起一段详细解释该技术，要有具体技术细节，不超过200字）
+        ……
+
+    - **关键点大标题 2**
+    （需要详细对关键点进行解释，关键点解释的数量根据要点动态调整）
+        - **关键点解释1**
+        （另起一段详细解释该技术，要有具体技术细节，不超过200字）
+        - **关键点解释2**
+        （另起一段详细解释该技术，要有具体技术细节，不超过200字）
+        ……
+
+    - **关键点大标题 3**
+    （需要详细对关键点进行解释，关键点解释的数量根据要点动态调整）
+        - **关键点解释1**
+        （另起一段详细解释该技术，要有具体技术细节，不超过200字）
+        - **关键点解释2**
+        （另起一段详细解释该技术，要有具体技术细节，不超过200字）   
+        ……
+    ……
+
+    [相关论文]([URL])
+   ```
+
+   **关于 [阅读原文] 的特别说明：**
+   - 必须使用提供的 primary_url，这是优先级最高的官方核心信源
+   - 禁止使用量子位、36kr等二手媒体链接
+
+   **关于 [相关论文] 的特别说明：**
+   - 请在"候选 arXiv 论文库"中查找与当前事件**高度相关**的论文
+   - 如果找到匹配的论文，请将 `[相关论文]([URL])` 替换为实际的论文链接
+   - **如果没有找到高度相关的论文，请务必删除这一行**
+
+**事件数据：**
+```json
+{json.dumps(batch_data, ensure_ascii=False, indent=2)}
+```
+
+**返回格式：**
+请返回一个 JSON 数组，包含每个事件的生成结果：
+```json
+[
+  {{
+    "event_id": "xxx",
+    "category": "Infrastructure", 
+    "markdown_content": "### **标题**..."
+  }},
+  ...
+]
+```
+请只返回 JSON。
+"""
+        
+        for retry in range(self.max_retries):
+            response = self._call_llm(prompt, temperature=0.3)
+            results = self._parse_json_response(response)
+            if results:
+                # 验证格式
+                valid_results = []
+                errors = []
+                for item in results:
+                    is_valid, error = self._validate_news_item_format(item.get("markdown_content", ""))
+                    if is_valid:
+                        valid_results.append(item)
+                    else:
+                        errors.append(f"事件 '{item.get('event_id', 'Unknown')}' 格式错误: {error}")
+                
+                if not errors:
+                    return valid_results
+                
+                # 如果有错误且还有重试次数，将错误加入 prompt 重试
+                logger.warning(f"批次生成存在格式错误: {'; '.join(errors)}")
+                if retry < self.max_retries - 1:
+                    prompt += f"\n\n**修正要求**: 上次生成存在以下格式错误，请严格修正：\n" + "\n".join(errors)
+                    continue
+                else:
+                    return valid_results
+            
+            await asyncio.sleep(1)
+            
+        return []
+
     async def _generate_news_entries_batch(self, batch_items: List[NewsItem], candidate_papers: List[Dict] = None) -> List[Dict[str, str]]:
         """
         分批生成新闻条目内容 (并发处理)
@@ -958,11 +1204,15 @@ all:"Large Language Model" AND all:Reasoning
         batch_data = []
         for item in batch_items:
             pub_date = datetime.fromtimestamp(item.publish_time).strftime('%Y-%m-%d %H:%M')
+            
+            # 获取优先级最高的官方信源 URL
+            primary_url = self._get_primary_source_url(item)
+            
             batch_data.append({
                 "article_id": item.article_id,
                 "title": item.title,
                 "source": item.source,
-                "url": item.url,
+                "url": primary_url,  # 使用优先级最高的官方信源
                 "publish_time": pub_date,
                 "content": item.content,  # 使用完整内容进行深度阅读
             })
@@ -1084,7 +1334,7 @@ all:"Large Language Model" AND all:Reasoning
             
         return []
 
-    async def generate_final_report(self, news_items: List[NewsItem], arxiv_papers: List[Dict] = None, quality_check: bool = True) -> Optional[str]:
+    async def generate_final_report(self, news_items: List[NewsItem], arxiv_papers: List[Dict] = None, quality_check: bool = True, days: int = 7) -> Optional[str]:
         """
         生成最终报告 (多轮生成模式)
         
@@ -1092,6 +1342,7 @@ all:"Large Language Model" AND all:Reasoning
             news_items: 排序后的新闻列表
             arxiv_papers: 相关 arXiv 论文列表
             quality_check: 是否进行质量检查
+            days: 报告覆盖的天数范围
             
         Returns:
             报告内容
@@ -1103,32 +1354,53 @@ all:"Large Language Model" AND all:Reasoning
             logger.warning("没有新闻可以生成报告")
             return None
 
-        # 1. 准备数据：筛选 S/A/B 级新闻进入正文
-        valid_items = [item for item in news_items if item.ranking_level in ["S", "A", "B"]]
-        # 如果 S/A/B 太少，考虑把 C 级的前几名加进来
-        if len(valid_items) < 5:
-             c_items = [item for item in news_items if item.ranking_level == "C"]
-             valid_items.extend(c_items[:5])
+        # 1. 准备数据：按事件整体排序，每个事件使用最高分新闻作为排序依据
+        # 首先按 event_id 分组
+        event_groups = defaultdict(list)
+        for item in news_items:
+            event_groups[item.event_id].append(item)
         
-        # 确保按分数排序
-        valid_items.sort(key=lambda x: x.final_score, reverse=True)
+        # 每个事件选择最高分的新闻作为排序代表，但保留该事件的全部新闻用于生成
+        event_representatives = []
+        for event_id, items in event_groups.items():
+            # 按 final_score 排序
+            sorted_event_items = sorted(items, key=lambda x: x.final_score, reverse=True)
+            best_item = sorted_event_items[0]
+            event_representatives.append({
+                "event_id": event_id,
+                "best_item": best_item,
+                "event_score": best_item.final_score,  # 事件分数 = 代表新闻的分数
+                "all_items": sorted_event_items  # 保留该事件的全部新闻（去重后最多3条）
+            })
         
-        logger.info(f"将为 {len(valid_items)} 条高价值新闻生成详细报告")
+        # 按事件分数排序
+        event_representatives.sort(key=lambda x: x["event_score"], reverse=True)
+        
+        # 取前10个事件
+        target_count = 10
+        top_events = event_representatives[:target_count]
+        
+        logger.info(f"共识别 {len(event_groups)} 个独立事件，将为前 {len(top_events)} 个事件生成详细报告")
+        for i, e in enumerate(top_events, 1):
+            logger.info(f"  [{i}] {e['event_id']}: 分数={e['event_score']:.2f}, 包含 {len(e['all_items'])} 条新闻, 代表: {e['best_item'].title[:40]}...")
 
-        # 2. 分批生成内容 (Batch Processing)
-        batch_size = 5
+        # 2. 分批生成内容 (按事件生成，每个事件综合其下所有新闻)
+        batch_size = 3  # 每批处理3个事件
         generated_entries = []
         
-        for i in range(0, len(valid_items), batch_size):
-            batch = valid_items[i:i + batch_size]
-            logger.info(f"正在生成报告详情：批次 {i // batch_size + 1} (共 {len(batch)} 条)")
+        for i in range(0, len(top_events), batch_size):
+            batch_events = top_events[i:i + batch_size]
+            logger.info(f"正在生成报告详情：批次 {i // batch_size + 1} (共 {len(batch_events)} 个事件)")
             
-            # 并发生成该批次的内容
-            entries = await self._generate_news_entries_batch(batch, candidate_papers=arxiv_papers)
+            # 按事件生成内容，每个事件使用其下所有新闻
+            entries = await self._generate_event_entries_batch(batch_events, candidate_papers=arxiv_papers)
             if entries:
                 generated_entries.extend(entries)
             else:
                 logger.error(f"批次 {i // batch_size + 1} 生成失败")
+        
+        # 用于后续速览生成的代表新闻列表
+        valid_items = [e["best_item"] for e in top_events]
 
         # 3. 组织内容 并 提取已使用的链接
         # 建立 article_id 到 news_item 的映射，方便获取额外信息
@@ -1164,17 +1436,9 @@ all:"Large Language Model" AND all:Reasoning
                 elif "arxiv.org/pdf/" in clean_link:
                     used_urls.add(clean_link.replace("/pdf/", "/abs/"))
 
-        # 4. 生成“本期速览” (Top 10)
-        top_items = valid_items[:10]
-        if len(top_items) < 10:
-            # 需要从 C 级中补足，按总分排序取前若干
-            c_pool = [item for item in news_items if item.ranking_level == "C" and item not in top_items]
-            # news_items 在 step4_rank 已按 final_score 排序，这里保持顺序追加
-            for c_item in c_pool:
-                if len(top_items) >= 10:
-                    break
-                top_items.append(c_item)
-        overview_prompt = f"""请为以下新闻生成“本期速览”列表。
+        # 4. 生成"本期速览" (使用与详细报告相同的 valid_items)
+        top_items = valid_items  # 速览和详细报告使用相同的新闻列表
+        overview_prompt = f"""请为以下新闻生成"本期速览"列表。
 要求：
 - 每条新闻用一行 Markdown 列表项表示。
 - 格式：* **[[标签]]** [**新闻标题**]: [1-2句话核心看点]
@@ -1205,8 +1469,10 @@ all:"Large Language Model" AND all:Reasoning
             if m:
                 title_tag_map[m.group("title").strip()] = m.group("tag").strip()
 
-        # 建立 article_id -> category 的映射 (用于非 Top 10 新闻的标签回退)
+        # 建立 event_id -> category 的映射 (用于非 Top 10 新闻的标签回退)
+        # 同时建立 article_id -> category 的映射
         id_category_map = {}
+        event_category_map = {}
         for entry in generated_entries:
             cat = entry.get("category", "Model")
             # 映射英文分类到中文标签
@@ -1215,7 +1481,14 @@ all:"Large Language Model" AND all:Reasoning
                 "Model": "[模型与技术]",
                 "Application": "[应用与智能体]"
             }.get(cat, "[其他]")
-            id_category_map[entry.get("article_id")] = cn_cat
+            event_id = entry.get("event_id")
+            event_category_map[event_id] = cn_cat
+            # 同时为该事件下的所有文章建立映射
+            for e in top_events:
+                if e["event_id"] == event_id:
+                    for item in e["all_items"]:
+                        id_category_map[item.article_id] = cn_cat
+                    break
 
         # 6. 生成“拓展阅读” (Reference Links)
         # 这里收集所有新闻（包括 C 级）的参考链接，以及 arXiv 论文
@@ -1336,14 +1609,10 @@ all:"Large Language Model" AND all:Reasoning
         reference_section = "\n\n".join(sections)
 
         # 6. 最终组装
-        publish_times = [item.publish_time for item in news_items if item.publish_time]
-        if publish_times:
-            date_range_start = datetime.fromtimestamp(min(publish_times)).strftime('%Y-%m-%d')
-            date_range_end = datetime.fromtimestamp(max(publish_times)).strftime('%Y-%m-%d')
-        else:
-            today_str = datetime.now().strftime('%Y-%m-%d')
-            date_range_start = today_str
-            date_range_end = today_str
+        # 使用 days 参数计算日期范围，而不是根据新闻发布时间
+        today = datetime.now()
+        date_range_end = today.strftime('%Y-%m-%d')
+        date_range_start = (today - timedelta(days=days - 1)).strftime('%Y-%m-%d')
 
         final_report = f"""# AI 前沿动态速报 ({date_range_start} 至 {date_range_end})
 
@@ -1464,7 +1733,7 @@ all:"Large Language Model" AND all:Reasoning
 1. 严格遵循模板格式，一级标题和二级标题必须与模板一致
 2. 新闻已按 S/A/B/C 级别排序，优先关注 S 级和 A 级新闻
 3. 深度解读部分要有实质内容，结合技术背景和行业影响进行分析
-4. 如果新闻数据中提供了"原始来源"，阅读原文的链接必须使用原始来源URL，禁止使用量子位自身链接
+4. 如果新闻数据中提供了"原始来源"，阅读原文的链接必须使用官方核心信源来源URL，禁止使用量子位自身链接
 5. Source 字段优先填写原始来源名称（如 OpenAI, arXiv 等）
 6. 语言风格要专业、客观、有洞察力
 7. 输出必须是 Markdown 格式
@@ -1580,7 +1849,7 @@ all:"Large Language Model" AND all:Reasoning
             logger.info(f"中间结果已保存: {arxiv_output_file}")
         
         # 7. 生成报告
-        report_content = await self.generate_final_report(news_items, arxiv_papers=arxiv_papers, quality_check=True)
+        report_content = await self.generate_final_report(news_items, arxiv_papers=arxiv_papers, quality_check=True, days=days)
         
         if report_content:
             # 保存最终报告
