@@ -17,7 +17,7 @@ import httpx
 from bs4 import BeautifulSoup
 from sqlalchemy import select
 
-from database.models import QbitaiArticle, QbitaiArticleComment
+from database.models import QbitaiArticle
 from database.db_session import get_session
 from crawler import utils
 
@@ -222,52 +222,6 @@ class QbitaiWebScraper:
             logger.error(f"Failed to get article details {article_id}: {e}")
             return None
 
-    async def get_comments(self, article_id: str, url: str) -> List[Dict]:
-        """Fetch comments (Basic implementation)."""
-        try:
-            # QbitAI comments might need JS or specific API, basic HTML parsing here
-            html = await self.fetch_page(url)
-            if not html:
-                return []
-            
-            soup = BeautifulSoup(html, 'html.parser')
-            comments = []
-            
-            comment_elements = soup.find_all(class_=re.compile(r'comment', re.I))
-            
-            for idx, elem in enumerate(comment_elements[:50]):
-                try:
-                    user_elem = elem.find(class_=re.compile(r'user|author', re.I))
-                    user_name = user_elem.get_text(strip=True) if user_elem else f'User{idx}'
-                    
-                    content_elem = elem.find(class_=re.compile(r'content|text', re.I))
-                    if not content_elem:
-                        content_elem = elem.find('p')
-                    content = content_elem.get_text(strip=True) if content_elem else ''
-                    
-                    if not content:
-                        continue
-                    
-                    comments.append({
-                        'comment_id': f"{article_id}_comment_{idx}",
-                        'article_id': article_id,
-                        'user_name': user_name,
-                        'user_avatar': '',
-                        'content': content,
-                        'publish_time': utils.get_current_timestamp(),
-                        'publish_date': datetime.now().strftime('%Y-%m-%d'),
-                        'like_count': 0,
-                        'sub_comment_count': 0,
-                        'parent_comment_id': None,
-                    })
-                except Exception:
-                    continue
-            
-            return comments
-        except Exception as e:
-            logger.warning(f"Failed to get comments for {article_id}: {e}")
-            return []
-
     def _extract_reference_links(self, soup: BeautifulSoup, content_elem: Optional[BeautifulSoup]) -> List[Dict]:
         """提取文章中的参考链接（论文、GitHub、官方网站等）
         修改：同时扫描文本内容中的URL和<a>标签链接
@@ -449,26 +403,6 @@ async def save_article_to_db(article: Dict):
         
         # 移除手动 commit，让上下文管理器自动处理
 
-async def save_comment_to_db(comment: Dict):
-    async with get_session() as session:
-        comment_id = comment.get('comment_id')
-        stmt = select(QbitaiArticleComment).where(QbitaiArticleComment.comment_id == comment_id)
-        result = await session.execute(stmt)
-        existing = result.scalar_one_or_none()
-        
-        if existing:
-            existing.last_modify_ts = utils.get_current_timestamp()
-            # update logic if needed
-        else:
-            comment['add_ts'] = utils.get_current_timestamp()
-            comment['last_modify_ts'] = utils.get_current_timestamp()
-            
-            valid_keys = {c.name for c in QbitaiArticleComment.__table__.columns}
-            filtered_comment = {k: v for k, v in comment.items() if k in valid_keys}
-            
-            db_comment = QbitaiArticleComment(**filtered_comment)
-            session.add(db_comment)
-
 async def run_crawler(days=3):
     """Run the crawler for the specified number of past days."""
     logger.info("=" * 60)
@@ -541,17 +475,6 @@ async def run_crawler(days=3):
                         new_articles_in_page += 1
                     
                     await save_article_to_db(article)
-                    
-                    # Comments (optional, don't fail if comments fail)
-                    try:
-                        comments = await scraper.get_comments(article_id, article_item['url'])
-                        for comment in comments:
-                            try:
-                                await save_comment_to_db(comment)
-                            except Exception as e:
-                                logger.warning(f"Failed to save comment: {e}")
-                    except Exception as e:
-                        logger.warning(f"Failed to get comments for {article_id}: {e}")
                     
                     await asyncio.sleep(1)
                         

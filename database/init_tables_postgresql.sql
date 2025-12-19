@@ -7,7 +7,6 @@
 -- Table structure for qbitai_article
 -- 量子位文章表：存储从量子位网站爬取的AI相关文章
 -- ----------------------------
-DROP TABLE IF EXISTS qbitai_article_comment CASCADE;
 DROP TABLE IF EXISTS qbitai_article CASCADE;
 
 CREATE TABLE qbitai_article (
@@ -65,55 +64,11 @@ COMMENT ON COLUMN qbitai_article.reference_links IS '文章中的参考链接(JS
 COMMENT ON COLUMN qbitai_article.add_ts IS '记录添加时间戳';
 COMMENT ON COLUMN qbitai_article.last_modify_ts IS '记录最后修改时间戳';
 
--- ----------------------------
--- Table structure for qbitai_article_comment
--- 量子位文章评论表：存储文章评论信息
--- ----------------------------
-CREATE TABLE qbitai_article_comment (
-    id SERIAL PRIMARY KEY,
-    comment_id VARCHAR(255) NOT NULL,
-    article_id VARCHAR(255) NOT NULL,
-    user_name VARCHAR(255),
-    user_avatar VARCHAR(512),
-    content TEXT NOT NULL,
-    publish_time BIGINT,
-    publish_date VARCHAR(10),
-    like_count INTEGER DEFAULT 0,
-    sub_comment_count INTEGER DEFAULT 0,
-    parent_comment_id VARCHAR(255),
-    add_ts BIGINT NOT NULL,
-    last_modify_ts BIGINT NOT NULL,
-    CONSTRAINT fk_qbitai_comment_article FOREIGN KEY (article_id) 
-        REFERENCES qbitai_article(article_id) ON DELETE CASCADE
-);
-
--- 创建唯一索引
-CREATE UNIQUE INDEX idx_qbitai_comment_unique ON qbitai_article_comment(comment_id);
-CREATE INDEX idx_qbitai_comment_article ON qbitai_article_comment(article_id);
-CREATE INDEX idx_qbitai_comment_date ON qbitai_article_comment(publish_date);
-
--- 表注释
-COMMENT ON TABLE qbitai_article_comment IS '量子位文章评论表';
-COMMENT ON COLUMN qbitai_article_comment.id IS '自增ID';
-COMMENT ON COLUMN qbitai_article_comment.comment_id IS '评论唯一ID';
-COMMENT ON COLUMN qbitai_article_comment.article_id IS '对应的文章ID';
-COMMENT ON COLUMN qbitai_article_comment.user_name IS '评论者用户名';
-COMMENT ON COLUMN qbitai_article_comment.user_avatar IS '评论者头像URL';
-COMMENT ON COLUMN qbitai_article_comment.content IS '评论内容';
-COMMENT ON COLUMN qbitai_article_comment.publish_time IS '发布时间戳';
-COMMENT ON COLUMN qbitai_article_comment.publish_date IS '发布日期(YYYY-MM-DD)';
-COMMENT ON COLUMN qbitai_article_comment.like_count IS '点赞数';
-COMMENT ON COLUMN qbitai_article_comment.sub_comment_count IS '子评论数';
-COMMENT ON COLUMN qbitai_article_comment.parent_comment_id IS '父评论ID(回复评论时)';
-COMMENT ON COLUMN qbitai_article_comment.add_ts IS '记录添加时间戳';
-COMMENT ON COLUMN qbitai_article_comment.last_modify_ts IS '记录最后修改时间戳';
-
 -- ===============================
 -- 索引优化
 -- ===============================
 -- 为常用查询优化添加复合索引
 CREATE INDEX idx_article_date_category ON qbitai_article(publish_date, category);
-CREATE INDEX idx_comment_article_date ON qbitai_article_comment(article_id, publish_date);
 
 -- ===============================
 -- 数据库配置说明

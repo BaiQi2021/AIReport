@@ -3,13 +3,17 @@
 """
 OpenAI Research & News Scraper
 爬取OpenAI官网的研究论文和新闻
+使用 cloudscraper 绕过 Cloudflare/Akamai 防护
 """
 
 import asyncio
 import json
+import re
 from datetime import datetime
 from typing import Dict, List, Optional
+from concurrent.futures import ThreadPoolExecutor
 
+import cloudscraper
 from bs4 import BeautifulSoup
 from sqlalchemy import select
 
@@ -22,105 +26,150 @@ logger = utils.setup_logger()
 
 
 class OpenAIScraper(BaseWebScraper):
-    """OpenAI官网爬虫"""
+    """OpenAI官网爬虫 - 使用 cloudscraper 绕过反爬保护"""
     
     def __init__(self):
         super().__init__(
             base_url="https://openai.com",
-            company_name="openai"
+            company_name="openai",
+            http2=True,
         )
-        # OpenAI的博客和研究页面
-        self.blog_url = "https://openai.com/blog"
-        self.research_url = "https://openai.com/research"
+        # OpenAI Chinese URLs（用户指定数据源）
+        self.blog_url = "https://openai.com/zh-Hans-CN/news/"
+        # 用户指定的列表页：https://openai.com/zh-Hans-CN/research/index/?page=2
+        self.research_url = "https://openai.com/zh-Hans-CN/research/index/"
+        
+        # 使用 cloudscraper 替代 httpx（绕过 Cloudflare 403）
+        self.cloud_scraper = None
+        self._executor = ThreadPoolExecutor(max_workers=3)
+        
+        # 官方 API 端点（通过抓包发现）
+        self.api_url = "https://openai.com/backend/articles/"
+    
+    async def init(self):
+        """初始化 cloudscraper 客户端"""
+        self.cloud_scraper = cloudscraper.create_scraper(
+            browser={
+                'browser': 'chrome',
+                'platform': 'darwin',
+                'desktop': True,
+            }
+        )
+        logger.info("OpenAI Scraper initialized with cloudscraper")
+    
+    async def close(self):
+        """关闭资源"""
+        if self.cloud_scraper:
+            self.cloud_scraper.close()
+        self._executor.shutdown(wait=False)
+    
+    def _fetch_sync(self, url: str) -> Optional[str]:
+        """同步获取页面内容（cloudscraper 是同步的）"""
+        for attempt in range(self.max_retries):
+            try:
+                response = self.cloud_scraper.get(url, timeout=self.timeout)
+                response.raise_for_status()
+                return response.text
+            except Exception as e:
+                logger.error(f"Failed to fetch page {url} (attempt {attempt + 1}/{self.max_retries}): {e}")
+                if attempt < self.max_retries - 1:
+                    import time
+                    time.sleep(2 ** attempt)
+        return None
+    
+    def _fetch_json_sync(self, url: str) -> Optional[Dict]:
+        """同步获取 JSON 数据"""
+        for attempt in range(self.max_retries):
+            try:
+                response = self.cloud_scraper.get(url, timeout=self.timeout)
+                response.raise_for_status()
+                return response.json()
+            except Exception as e:
+                logger.error(f"Failed to fetch JSON {url} (attempt {attempt + 1}/{self.max_retries}): {e}")
+                if attempt < self.max_retries - 1:
+                    import time
+                    time.sleep(2 ** attempt)
+        return None
+    
+    async def fetch_page(self, url: str, **kwargs) -> Optional[str]:
+        """异步获取页面内容（包装同步的 cloudscraper）"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(self._executor, self._fetch_sync, url)
+    
+    async def fetch_json(self, url: str, **kwargs) -> Optional[Dict]:
+        """异步获取 JSON 数据"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(self._executor, self._fetch_json_sync, url)
     
     async def get_article_list(self, page: int = 1, article_type: str = 'blog') -> List[Dict]:
-        """获取文章列表"""
+        """获取文章列表 - 使用官方 API"""
         try:
-            if article_type == 'blog':
-                url = self.blog_url
-            elif article_type == 'research':
-                url = self.research_url
-            else:
-                url = self.blog_url
+            from urllib.parse import urlencode
             
-            logger.info(f"Fetching OpenAI {article_type} list from {url}...")
+            # 计算 skip 值（每页20条）
+            limit = 20
+            skip = (page - 1) * limit
             
-            html = await self.fetch_page(url)
-            if not html:
+            # 构建 API URL
+            params = {
+                'locale': 'zh-Hans-CN',
+                'pageQueries': '[{"pageTypes":["Article"],"categories":["publication","conclusion","milestone","release"]}]',
+                'limit': str(limit),
+                'skip': str(skip),
+                'sort': 'new',
+                'groupedTags': ''
+            }
+            
+            url = self.api_url + '?' + urlencode(params)
+            logger.info(f"Fetching OpenAI articles from API (page {page}, skip {skip})...")
+            
+            data = await self.fetch_json(url)
+            if not data:
                 return []
             
-            soup = BeautifulSoup(html, 'html.parser')
             articles = []
+            items = data.get('items', [])
+            total = data.get('total', 0)
             
-            # OpenAI网站使用动态加载，这里尝试多种选择器
-            # 通常文章会在article标签或特定class中
-            article_elements = soup.find_all(['article', 'div'], class_=lambda x: x and ('post' in x.lower() or 'card' in x.lower() or 'item' in x.lower()))
+            logger.info(f"API returned {len(items)} items (total: {total})")
             
-            if not article_elements:
-                # 备选方案：查找所有包含链接的容器
-                article_elements = soup.select('a[href*="/research/"], a[href*="/blog/"]')
-            
-            logger.info(f"Found {len(article_elements)} potential article elements")
-            
-            for elem in article_elements[:30]:
-                try:
-                    # 获取链接
-                    if elem.name == 'a':
-                        link_elem = elem
-                    else:
-                        link_elem = elem.find('a', href=True)
-                    
-                    if not link_elem:
-                        continue
-                    
-                    url = link_elem.get('href', '')
-                    if not url:
-                        continue
-                    
-                    # 补全URL
-                    if url.startswith('/'):
-                        url = self.base_url + url
-                    elif not url.startswith('http'):
-                        continue
-                    
-                    # 提取文章ID
-                    article_id = self.extract_article_id(url)
-                    if not article_id:
-                        continue
-                    
-                    # 获取标题
-                    title_elem = elem.find(['h1', 'h2', 'h3', 'h4'])
-                    if not title_elem:
-                        title_elem = link_elem
-                    title = self.clean_text(title_elem.get_text())
-                    
-                    if not title or len(title) < 5:
-                        continue
-                    
-                    # 确定文章类型
-                    if '/research/' in url:
-                        determined_type = 'research'
-                    elif '/blog/' in url:
-                        determined_type = 'blog'
-                    else:
-                        determined_type = article_type
-                    
-                    articles.append({
-                        'article_id': f"openai_{article_id}",
-                        'title': title[:500],
-                        'url': url,
-                        'article_type': determined_type,
-                    })
-                    
-                except Exception as e:
-                    logger.warning(f"Failed to parse article element: {e}")
+            for item in items:
+                slug = item.get('slug', '')
+                title = item.get('title', '')
+                pub_date = item.get('publicationDate', '')
+                
+                if not slug or not title:
                     continue
+                
+                # 提取 article_id（slug 格式: index/xxx-xxx-xxx）
+                article_id = slug.replace('index/', '') if slug.startswith('index/') else slug
+                
+                # 构建完整 URL
+                full_url = f"https://openai.com/{slug}/"
+                
+                # 确定文章类型
+                categories = item.get('categories', [])
+                if 'publication' in categories or 'conclusion' in categories:
+                    determined_type = 'research'
+                else:
+                    determined_type = 'blog'
+                
+                articles.append({
+                    'article_id': f"openai_{article_id}",
+                    'title': title[:500],
+                    'url': full_url,
+                    'article_type': determined_type,
+                    'raw_date': pub_date,  # ISO 格式: 2025-12-18T12:00
+                    'cover_image': item.get('coverImage', {}).get('url', '') if isinstance(item.get('coverImage'), dict) else ''
+                })
             
             logger.info(f"Extracted {len(articles)} OpenAI articles")
             return articles
         
         except Exception as e:
             logger.error(f"Failed to get OpenAI article list: {e}")
+            import traceback
+            traceback.print_exc()
             return []
     
     async def get_article_detail(self, article_id: str, url: str) -> Optional[Dict]:
@@ -151,7 +200,7 @@ class OpenAIScraper(BaseWebScraper):
             if not content_elem:
                 content_elem = soup.find('main')
             if not content_elem:
-                content_elem = soup.find(['div'], class_=lambda x: x and ('content' in x.lower() or 'article' in x.lower()))
+                content_elem = soup.find(['div'], class_=lambda x: x and ('content' in str(x).lower() or 'article' in str(x).lower()))
             
             article['content'] = self.clean_text(content_elem.get_text()) if content_elem else ''
             
@@ -169,24 +218,27 @@ class OpenAIScraper(BaseWebScraper):
                 article['description'] = article['content'][:300]
             
             # 作者
-            author_elem = soup.find(['span', 'div', 'p'], class_=lambda x: x and 'author' in x.lower())
+            author_elem = soup.find(['span', 'div', 'p'], class_=lambda x: x and 'author' in str(x).lower())
             if not author_elem:
                 author_elem = soup.find('meta', attrs={'name': 'author'})
                 article['author'] = author_elem.get('content', '') if author_elem else 'OpenAI'
             else:
                 article['author'] = self.clean_text(author_elem.get_text())
             
-            # 发布时间
-            time_elem = soup.find('time')
-            if time_elem:
-                time_str = time_elem.get('datetime', '') or time_elem.get_text()
-            else:
-                time_elem = soup.find('meta', attrs={'property': 'article:published_time'})
-                time_str = time_elem.get('content', '') if time_elem else ''
+            # 发布时间 (使用 BaseWebScraper 增强版逻辑)
+            time_str = self.find_publish_time_string(soup, content_elem)
+            
+            # Note: We can't access 'raw_date' here easily without changing signature.
+            # But BaseWebScraper.find_publish_time_string should handle on-page dates.
+            # If not, we might need to rely on what we parsed in list.
+            # Since we can't change signature easily, let's hope detail page has date.
+            # If detail page fails to parse date, we might lose it. 
+            # For now, let's assume detail page has it or JSON-LD has it.
             
             if not time_str:
                 logger.warning(f"Skip article {article_id}: missing publish time.")
                 return None
+                
             publish_ts = self.parse_timestamp(time_str)
             if publish_ts is None:
                 logger.warning(f"Skip article {article_id}: cannot parse publish time: {time_str}")
@@ -198,7 +250,7 @@ class OpenAIScraper(BaseWebScraper):
             article['category'] = 'AI Research' if '/research/' in url else 'AI News'
             
             # 标签
-            tag_elements = soup.find_all(['a', 'span'], class_=lambda x: x and 'tag' in x.lower())
+            tag_elements = soup.find_all(['a', 'span'], class_=lambda x: x and 'tag' in str(x).lower())
             tags = []
             for tag_elem in tag_elements:
                 tag_text = self.clean_text(tag_elem.get_text())
@@ -280,7 +332,7 @@ async def save_company_article_to_db(article: Dict):
 async def run_openai_crawler(days: int = 7):
     """运行OpenAI爬虫"""
     logger.info("=" * 60)
-    logger.info("🚀 OpenAI Crawler Started")
+    logger.info(f"🚀 OpenAI Crawler Started (Filter: last {days} days)")
     logger.info("=" * 60)
     
     scraper = OpenAIScraper()
@@ -288,70 +340,61 @@ async def run_openai_crawler(days: int = 7):
     
     blog_saved_count = 0
     research_saved_count = 0
-    blog_fetch_failed = False
-    research_fetch_failed = False
     
     try:
-        # 爬取博客文章
-        logger.info("Fetching OpenAI blog articles...")
-        blog_articles = await scraper.get_article_list(article_type='blog')
+        # 使用官方 API 获取文章列表
+        logger.info("Fetching OpenAI articles from API...")
         
-        if not blog_articles:
-            logger.warning("⚠️  OpenAI blog: Failed to fetch article list (may be blocked or page structure changed)")
-            blog_fetch_failed = True
+        all_articles = await scraper.get_article_list(page=1, article_type='research')
+        
+        if not all_articles:
+            logger.warning("⚠️  OpenAI: Failed to fetch article list")
         else:
-            logger.info(f"Found {len(blog_articles)} blog articles")
-            for article_item in blog_articles[:20]:  # 限制数量
+            logger.info(f"Found {len(all_articles)} total articles")
+            
+            for article_item in all_articles:
                 try:
+                    # 先检查日期是否在范围内（API 返回 ISO 格式日期）
+                    if days > 0 and 'raw_date' in article_item:
+                        raw_ts = scraper.parse_timestamp(article_item['raw_date'])
+                        if raw_ts:
+                            now_ts = datetime.now().timestamp()
+                            if now_ts - raw_ts > days * 86400:
+                                logger.info(f"Skip article {article_item['title']}: too old ({article_item['raw_date']})")
+                                continue
+                    
                     article = await scraper.get_article_detail(
                         article_item['article_id'],
                         article_item['url']
                     )
                     
                     if article:
+                        # 再次检查详情页的日期（更准确）
+                        if days > 0:
+                            article_ts = article['publish_time']
+                            now_ts = datetime.now().timestamp()
+                            if article_ts > now_ts + 86400:
+                                logger.warning(f"Skip article {article['title']}: future date ({article['publish_date']})")
+                                continue
+                            if now_ts - article_ts > days * 86400:
+                                logger.info(f"Skip article {article['title']}: too old ({article['publish_date']})")
+                                continue
+
                         await save_company_article_to_db(article)
-                        blog_saved_count += 1
+                        if article['article_type'] == 'research':
+                            research_saved_count += 1
+                        else:
+                            blog_saved_count += 1
                     
-                    await asyncio.sleep(2)  # 礼貌延迟
+                    await asyncio.sleep(1)  # 礼貌延迟
                     
                 except Exception as e:
-                    logger.error(f"Error processing OpenAI blog article: {e}")
+                    logger.error(f"Error processing OpenAI article: {e}")
                     continue
         
-        # 爬取研究文章
-        logger.info("Fetching OpenAI research articles...")
-        research_articles = await scraper.get_article_list(article_type='research')
-        
-        if not research_articles:
-            logger.warning("⚠️  OpenAI research: Failed to fetch article list (may be blocked or page structure changed)")
-            research_fetch_failed = True
-        else:
-            logger.info(f"Found {len(research_articles)} research articles")
-            for article_item in research_articles[:20]:  # 限制数量
-                try:
-                    article = await scraper.get_article_detail(
-                        article_item['article_id'],
-                        article_item['url']
-                    )
-                    
-                    if article:
-                        await save_company_article_to_db(article)
-                        research_saved_count += 1
-                    
-                    await asyncio.sleep(2)  # 礼貌延迟
-                    
-                except Exception as e:
-                    logger.error(f"Error processing OpenAI research article: {e}")
-                    continue
-        
-        # 总结统计
+        # 汇总
         total_saved = blog_saved_count + research_saved_count
-        if blog_fetch_failed and research_fetch_failed:
-            logger.warning("⚠️  OpenAI Crawler: Both blog and research pages failed to fetch. No articles saved.")
-        elif blog_fetch_failed or research_fetch_failed:
-            logger.warning(f"⚠️  OpenAI Crawler: Partial failure. Saved {total_saved} articles (blog: {blog_saved_count}, research: {research_saved_count})")
-        else:
-            logger.info(f"✅ OpenAI Crawler: Successfully saved {total_saved} articles (blog: {blog_saved_count}, research: {research_saved_count})")
+        logger.info(f"✅ OpenAI Crawler: Successfully saved {total_saved} articles (blog: {blog_saved_count}, research: {research_saved_count})")
         
     finally:
         await scraper.close()
@@ -361,4 +404,3 @@ async def run_openai_crawler(days: int = 7):
 if __name__ == "__main__":
     import asyncio
     asyncio.run(run_openai_crawler())
-

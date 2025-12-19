@@ -7,6 +7,7 @@ Anthropic Research & News Scraper
 
 import asyncio
 import json
+import re
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -166,17 +167,34 @@ class AnthropicScraper(BaseWebScraper):
             else:
                 article['author'] = self.clean_text(author_elem.get_text())
             
-            # 发布时间
-            time_elem = soup.find('time')
-            if time_elem:
-                time_str = time_elem.get('datetime', '') or time_elem.get_text()
-            else:
-                time_elem = soup.find('meta', attrs={'property': 'article:published_time'})
-                time_str = time_elem.get('content', '') if time_elem else ''
+            # 发布时间 (使用 BaseWebScraper 增强版逻辑)
+            # Anthropic 页面可能把日期放在特定的 class 中，如 "PostHeader_date__..."
+            time_str = self.find_publish_time_string(soup, content_elem)
+            
+            if not time_str:
+                # 尝试查找特定class
+                date_elem = soup.find(class_=lambda x: x and 'date' in str(x).lower())
+                if date_elem:
+                    time_str = date_elem.get_text()
+            
+            if not time_str:
+                # 尝试查找包含年份的文本节点
+                import re
+                date_pattern = re.compile(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4}', re.IGNORECASE)
+                match = date_pattern.search(soup.get_text())
+                if match:
+                    time_str = match.group(0)
+
+            if not time_str:
+                # 如果是测试环境或找不到日期，暂时默认为今天，或者记录警告
+                # logger.warning(f"Skip article {article_id}: missing publish time.")
+                # 为了防止全部跳过，如果是测试（Anthropic往往很难抓），可以尝试JSON-LD再次确认
+                pass
             
             if not time_str:
                 logger.warning(f"Skip article {article_id}: missing publish time.")
                 return None
+                
             publish_ts = self.parse_timestamp(time_str)
             if publish_ts is None:
                 logger.warning(f"Skip article {article_id}: cannot parse publish time: {time_str}")
@@ -219,7 +237,7 @@ class AnthropicScraper(BaseWebScraper):
 async def run_anthropic_crawler(days: int = 7):
     """运行Anthropic爬虫"""
     logger.info("=" * 60)
-    logger.info("🚀 Anthropic Crawler Started")
+    logger.info(f"🚀 Anthropic Crawler Started (Filter: last {days} days)")
     logger.info("=" * 60)
     
     scraper = AnthropicScraper()
@@ -238,6 +256,17 @@ async def run_anthropic_crawler(days: int = 7):
                 )
                 
                 if article:
+                    # 检查日期
+                    if days > 0:
+                        article_ts = article['publish_time']
+                        now_ts = datetime.now().timestamp()
+                        if article_ts > now_ts + 86400:
+                             logger.warning(f"Skip article {article['title']}: future date ({article['publish_date']})")
+                             continue
+                        if now_ts - article_ts > days * 86400:
+                             logger.info(f"Skip article {article['title']}: too old ({article['publish_date']})")
+                             continue
+
                     await save_company_article_to_db(article)
                 
                 await asyncio.sleep(2)
@@ -258,6 +287,17 @@ async def run_anthropic_crawler(days: int = 7):
                 )
                 
                 if article:
+                    # 检查日期
+                    if days > 0:
+                        article_ts = article['publish_time']
+                        now_ts = datetime.now().timestamp()
+                        if article_ts > now_ts + 86400:
+                             logger.warning(f"Skip article {article['title']}: future date ({article['publish_date']})")
+                             continue
+                        if now_ts - article_ts > days * 86400:
+                             logger.info(f"Skip article {article['title']}: too old ({article['publish_date']})")
+                             continue
+
                     await save_company_article_to_db(article)
                 
                 await asyncio.sleep(2)
@@ -274,4 +314,3 @@ async def run_anthropic_crawler(days: int = 7):
 if __name__ == "__main__":
     import asyncio
     asyncio.run(run_anthropic_crawler())
-

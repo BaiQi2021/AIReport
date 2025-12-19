@@ -30,6 +30,8 @@ DB_TABLE_MAP = {
     'company': 'company_article',  # 公司文章表
     'news': 'qbitai_article',  # 新闻文章表
     'tools': 'qbitai_article',  # AI工具文章表
+    'aibase': 'aibase_article',  # AIbase文章表
+    'hubtoday': 'aibase_article',  # HubToday文章表(复用)
 }
 
 # 爬虫配置信息（用于注册）
@@ -97,6 +99,30 @@ CRAWLER_CONFIGS: List[Dict] = [
     },
     
     # 新闻媒体爬虫
+    {
+        'key': 'aibase',
+        'name': 'AIbase',
+        'module': 'crawler.aibase_scraper',
+        'class': 'AibaseWebScraper',
+        'runner': 'run_crawler',
+        'type': 'news',
+        'enabled': True,
+        'priority': 1,
+        'description': 'AIbase AI Daily News',
+        'db_table': 'aibase_article',
+    },
+    {
+        'key': 'hubtoday',
+        'name': 'HubToday',
+        'module': 'crawler.hubtoday_scraper',
+        'class': 'HubTodayScraper',
+        'runner': 'run_crawler',
+        'type': 'news',
+        'enabled': True,
+        'priority': 1,
+        'description': 'He Xi 2077 AI Daily',
+        'db_table': 'aibase_article',
+    },
     {
         'key': 'qbitai',
         'name': '量子位',

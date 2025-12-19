@@ -14,7 +14,7 @@ crawler/
 │
 ├── anthropic_scraper.py     # Anthropic爬虫
 ├── google_ai_scraper.py     # Google AI爬虫
-├── meta_microsoft_scraper.py # Meta/Microsoft爬虫
+├── meta_microsoft_scraper.py # Meta爬虫
 ├── openai_scraper.py        # OpenAI爬虫
 ├── ai_companies_scraper.py  # NVIDIA等公司爬虫
 ├── qbitai_scraper.py        # 量子位爬虫

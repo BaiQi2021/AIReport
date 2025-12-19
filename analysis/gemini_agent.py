@@ -9,10 +9,15 @@ from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timedelta
 from pathlib import Path
 from collections import defaultdict
+import re
+import urllib.request
+import urllib.parse
+import xml.etree.ElementTree as ET
+import time
 
 from openai import OpenAI
 import httpx
-from sqlalchemy import select, desc, or_
+from sqlalchemy import select, desc, or_, delete
 
 from database.models import QbitaiArticle, CompanyArticle
 from database.db_session import get_session
@@ -27,7 +32,9 @@ class NewsItem:
     """新闻条目数据结构"""
     def __init__(self, article_id: str, title: str, description: str, 
                  content: str, url: str, source: str, publish_time: int,
-                 reference_links: Optional[str] = None):
+                 reference_links: Optional[str] = None,
+                 original_id: Optional[str] = None,
+                 source_table: Optional[str] = None):
         self.article_id = article_id
         self.title = title
         self.description = description
@@ -36,6 +43,10 @@ class NewsItem:
         self.source = source  # 来源：qbitai, openai, google等
         self.publish_time = publish_time
         self.reference_links = reference_links
+        
+        # 数据库回溯字段
+        self.original_id = original_id
+        self.source_table = source_table
         
         # 处理结果字段
         self.filter_decision = None  # "保留" or "剔除"
@@ -141,7 +152,9 @@ class GeminiAIReportAgent:
                     url=art.article_url,
                     source="量子位",
                     publish_time=art.publish_time,
-                    reference_links=art.reference_links
+                    reference_links=art.reference_links,
+                    original_id=art.article_id,
+                    source_table="qbitai_article"
                 ))
             
             # 获取公司官方文章
@@ -163,12 +176,57 @@ class GeminiAIReportAgent:
                     url=art.article_url,
                     source=art.company.upper(),
                     publish_time=art.publish_time,
-                    reference_links=art.reference_links
+                    reference_links=art.reference_links,
+                    original_id=art.article_id,
+                    source_table="company_article"
                 ))
         
         logger.info(f"共获取 {len(news_items)} 条新闻数据")
         return news_items
     
+    async def _delete_articles_from_db(self, items_to_delete: List[NewsItem]):
+        """
+        从数据库中删除指定的文章
+        
+        Args:
+            items_to_delete: 需要删除的新闻条目列表
+        """
+        if not items_to_delete:
+            return
+
+        logger.info(f"正在从数据库删除 {len(items_to_delete)} 条无效/重复数据...")
+        
+        # 按表分组
+        qbitai_ids = []
+        company_ids = []
+        
+        for item in items_to_delete:
+            if not item.original_id or not item.source_table:
+                logger.warning(f"无法删除文章 {item.article_id}: 缺少原始ID或表信息")
+                continue
+                
+            if item.source_table == "qbitai_article":
+                qbitai_ids.append(item.original_id)
+            elif item.source_table == "company_article":
+                company_ids.append(item.original_id)
+        
+        async with get_session() as session:
+            try:
+                if qbitai_ids:
+                    stmt = delete(QbitaiArticle).where(QbitaiArticle.article_id.in_(qbitai_ids))
+                    result = await session.execute(stmt)
+                    logger.info(f"已删除 {result.rowcount} 条 Qbitai 数据")
+                
+                if company_ids:
+                    stmt = delete(CompanyArticle).where(CompanyArticle.article_id.in_(company_ids))
+                    result = await session.execute(stmt)
+                    logger.info(f"已删除 {result.rowcount} 条 Company 数据")
+                
+                await session.commit()
+            except Exception as e:
+                logger.error(f"删除数据库数据失败: {e}")
+                await session.rollback()
+
     def _call_llm(self, prompt: str, temperature: float = 0.1) -> Optional[str]:
         """
         调用 LLM API
@@ -235,6 +293,8 @@ class GeminiAIReportAgent:
         logger.info("=" * 60)
         logger.info("【第一步】开始过滤 (Filtering)...")
 
+        items_to_delete = []
+
         # 1. 预过滤：剔除内容过短或无内容的新闻
         valid_news_items = []
         for item in news_items:
@@ -245,11 +305,18 @@ class GeminiAIReportAgent:
                 valid_news_items.append(item)
             else:
                 logger.info(f"预过滤剔除（内容过少）: {item.title} (ID: {item.article_id})")
+                items_to_delete.append(item)
         
+        # 删除预过滤掉的数据
+        if items_to_delete:
+            await self._delete_articles_from_db(items_to_delete)
+            items_to_delete = [] # 清空列表以便复用
+
         news_items = valid_news_items
         logger.info(f"待处理新闻数: {len(news_items)}, 批处理大小: {batch_size}")
         
         filtered_items = []
+        rejected_items = []
         
         # 分批处理
         for i in range(0, len(news_items), batch_size):
@@ -321,6 +388,8 @@ class GeminiAIReportAgent:
                             
                             if item.filter_decision == "保留":
                                 filtered_items.append(item)
+                            else:
+                                rejected_items.append(item)
                     break
                 else:
                     logger.warning(f"批次 {i // batch_size + 1} 解析失败，重试 {retry + 1}/{self.max_retries}")
@@ -330,6 +399,11 @@ class GeminiAIReportAgent:
             # 避免 API 限流
             await asyncio.sleep(1)
         
+        # 删除被剔除的数据
+        if rejected_items:
+            logger.info(f"正在删除 {len(rejected_items)} 条被过滤的新闻...")
+            await self._delete_articles_from_db(rejected_items)
+            
         logger.info(f"过滤完成：保留 {len(filtered_items)}/{len(news_items)} 条新闻")
         return filtered_items
     
@@ -462,6 +536,7 @@ class GeminiAIReportAgent:
         logger.info(f"待处理事件数: {len(events)}")
         
         deduplicated_items = []
+        deleted_items = []
         
         for event_id, items in events.items():
             if len(items) == 1:
@@ -485,7 +560,7 @@ class GeminiAIReportAgent:
                     "publish_time": datetime.fromtimestamp(item.publish_time).strftime('%Y-%m-%d %H:%M')
                 })
             
-            prompt = f"""你是一个专业的AI新闻去重专家。以下是描述同一事件的多条新闻，请选出最权威、信息质量最高的一条。
+            prompt = f"""你是一个专业的AI新闻去重专家。以下是描述同一事件的多条新闻，请选出最权威、信息质量最高的**最多三条**。
 
 **保留优先级（从高到低）：**
 1. 官方核心信源: 官网发布、官方博客、arXiv 论文、GitHub Release
@@ -501,7 +576,7 @@ class GeminiAIReportAgent:
 ```
 
 **输出要求：**
-请选择一条最权威的新闻保留，其余标记为删除。以 JSON 数组格式返回：
+请选择最多三条最权威的新闻保留（如果只有1-3条，可全部保留；如果超过3条，请筛选出最好的3条），其余标记为删除。以 JSON 数组格式返回：
 - article_id: 文章ID
 - dedup_decision: "保留" 或 "删除"
 - dedup_reason: 判断理由（一句话）
@@ -532,6 +607,8 @@ class GeminiAIReportAgent:
                             
                             if item.dedup_decision == "保留":
                                 deduplicated_items.append(item)
+                            else:
+                                deleted_items.append(item)
                     break
                 else:
                     logger.warning(f"事件 {event_id} 去重失败，重试 {retry + 1}/{self.max_retries}")
@@ -541,9 +618,15 @@ class GeminiAIReportAgent:
                         items[0].dedup_decision = "保留"
                         items[0].dedup_reason = "去重失败，默认保留"
                         deduplicated_items.append(items[0])
+                        # 其余的暂时不动，避免误删
             
             await asyncio.sleep(0.5)
         
+        # 删除被去重的数据
+        if deleted_items:
+            logger.info(f"正在删除 {len(deleted_items)} 条重复新闻...")
+            await self._delete_articles_from_db(deleted_items)
+            
         logger.info(f"去重完成：保留 {len(deduplicated_items)}/{len(news_items)} 条新闻")
         return deduplicated_items
     
@@ -676,6 +759,174 @@ class GeminiAIReportAgent:
         logger.info(f"  C级: {sum(1 for x in news_items if x.ranking_level == 'C')} 条")
         
         return news_items
+
+    def search_arxiv(self, query: str, max_results: int = 5) -> List[Dict[str, str]]:
+        """
+        搜索 arXiv 论文
+        
+        Args:
+            query: 搜索查询字符串 (例如 "all:LLM")
+            max_results: 最大结果数
+            
+        Returns:
+            论文列表 [{'title': ..., 'url': ..., 'summary': ...}]
+        """
+        base_url = "http://export.arxiv.org/api/query"
+        
+        # 简单清理 query
+        query = query.replace('"', '%22')
+        
+        # 构建查询参数
+        params = {
+            "search_query": query,
+            "start": 0,
+            "max_results": max_results,
+            "sortBy": "submittedDate",
+            "sortOrder": "descending"
+        }
+        
+        # 手动拼接 URL 以确保 encoded 正确，或者使用 urllib.parse.quote 但保留 API 特殊字符
+        # 这里使用 urllib.parse.urlencode 应该足够安全
+        try:
+            query_string = urllib.parse.urlencode(params, safe=':')
+            url = f"{base_url}?{query_string}"
+            
+            logger.info(f"正在调用 arXiv API: {url}")
+            
+            # 遵守 API 规则，增加延时
+            time.sleep(3)
+            
+            # 设置 User-Agent
+            req = urllib.request.Request(
+                url, 
+                headers={'User-Agent': 'AIReportAgent/1.0 (mailto:your_email@example.com)'}
+            )
+            
+            with urllib.request.urlopen(req, timeout=30) as response:
+                xml_data = response.read()
+                
+            root = ET.fromstring(xml_data)
+            # 处理 namespace
+            # Atom feed 通常有默认 namespace，ElementTree 解析时需要在 tag 前加 {uri}
+            # 获取 root 的 namespace
+            ns_match = root.tag.split('}')[0] + '}' if '}' in root.tag else ''
+            
+            papers = []
+            entries = root.findall(f'{ns_match}entry')
+            
+            for entry in entries:
+                try:
+                    title_elem = entry.find(f'{ns_match}title')
+                    id_elem = entry.find(f'{ns_match}id')
+                    summary_elem = entry.find(f'{ns_match}summary')
+                    published_elem = entry.find(f'{ns_match}published')
+                    
+                    title = title_elem.text.strip().replace('\n', ' ') if title_elem is not None else "No Title"
+                    link = id_elem.text.strip() if id_elem is not None else ""
+                    summary = summary_elem.text.strip().replace('\n', ' ') if summary_elem is not None else ""
+                    published = published_elem.text.strip() if published_elem is not None else ""
+                    
+                    # 转换 article ID link 到 abstract page link
+                    # arXiv API id 通常是 http://arxiv.org/abs/xxxx.xxxx
+                    # 有时是 http://arxiv.org/api/xxxx
+                    if link:
+                        link = link.replace("/api/", "/abs/")
+                    
+                    papers.append({
+                        "title": title,
+                        "url": link,
+                        "summary": summary[:200] + "...",
+                        "published": published,
+                        "source": "arXiv",
+                        "type": "Paper"
+                    })
+                except Exception as e:
+                    logger.warning(f"解析 arXiv entry 失败: {e}")
+                    continue
+                
+            return papers
+            
+        except Exception as e:
+            logger.error(f"arXiv 搜索失败: {e}")
+            return []
+
+    async def step5_fetch_arxiv_papers(self, news_items: List[NewsItem]) -> List[Dict[str, str]]:
+        """
+        第五步：获取相关 arXiv 论文
+        
+        Args:
+            news_items: 排序后的新闻列表
+            
+        Returns:
+            相关论文列表
+        """
+        logger.info("=" * 60)
+        logger.info("【第五步】获取相关 arXiv 论文...")
+        
+        # 选取所有 S/A 级新闻，确保覆盖面
+        target_items = [item for item in news_items if item.ranking_level in ["S", "A"]]
+        
+        # 如果 S/A 级太少，补充 B 级前几名
+        if len(target_items) < 5:
+            b_items = [item for item in news_items if item.ranking_level == "B"]
+            target_items.extend(b_items[:5 - len(target_items)])
+            
+        if not target_items:
+            target_items = news_items[:5]
+            
+        if not target_items:
+            return []
+            
+        # 1. 提取搜索关键词
+        titles = "\n".join([f"- {item.title}" for item in target_items])
+        prompt = f"""请根据以下 AI 领域的热点新闻标题，构建用于 arXiv 搜索的查询关键词列表。
+
+新闻标题：
+{titles}
+
+要求：
+1. 分析每条新闻的核心技术实体（如模型名称 "Gemini 3", "Claude Sonnet" 或技术术语 "World Model", "Scaling Law"）。
+2. 构建 5-8 个独立的查询字符串，旨在尽可能覆盖这些新闻对应的主题。
+3. 格式：每行一个查询字符串，使用 `all:` 或 `ti:` 前缀。
+4. 示例：
+all:"Gemini 3"
+ti:"World Model" AND all:Genie
+all:"Large Language Model" AND all:Reasoning
+
+请直接返回查询字符串列表，每行一个。
+"""
+        response = self._call_llm(prompt)
+        if not response:
+            queries = ["all:Artificial Intelligence"]
+        else:
+            queries = [line.strip().strip('`').strip('"') for line in response.split('\n') if line.strip() and not line.strip().startswith('```')]
+        
+        # 限制查询数量，避免过多请求
+        queries = queries[:8]
+        logger.info(f"生成的 arXiv 查询: {queries}")
+        
+        all_papers = []
+        seen_ids = set()
+        
+        # 2. 执行搜索 (串行执行以遵守限流)
+        for query in queries:
+            if not query:
+                continue
+            # 清理 query
+            if "search_query=" in query:
+                query = query.replace("search_query=", "")
+                
+            # 每个 query 取 5 条，总共可能获取 25-40 条
+            papers = self.search_arxiv(query, max_results=5) 
+            
+            for paper in papers:
+                # 使用 URL 作为去重键
+                if paper['url'] not in seen_ids:
+                    all_papers.append(paper)
+                    seen_ids.add(paper['url'])
+            
+        logger.info(f"共获取到 {len(all_papers)} 篇不重复的 arXiv 论文")
+        return all_papers
     
     def _validate_news_item_format(self, content: str) -> Tuple[bool, str]:
         """验证新闻条目的 Markdown 格式"""
@@ -693,12 +944,13 @@ class GeminiAIReportAgent:
                 return False, error_msg
         return True, ""
 
-    async def _generate_news_entries_batch(self, batch_items: List[NewsItem]) -> List[Dict[str, str]]:
+    async def _generate_news_entries_batch(self, batch_items: List[NewsItem], candidate_papers: List[Dict] = None) -> List[Dict[str, str]]:
         """
         分批生成新闻条目内容 (并发处理)
         
         Args:
             batch_items: 这一批的新闻列表
+            candidate_papers: 候选 arXiv 论文列表
             
         Returns:
             生成的条目列表，每项包含 {"article_id", "category", "markdown_content"}
@@ -715,7 +967,18 @@ class GeminiAIReportAgent:
                 "content": item.content,  # 使用完整内容进行深度阅读
             })
 
+        # 构建候选论文上下文
+        papers_context = ""
+        if candidate_papers:
+            papers_list = []
+            for p in candidate_papers:
+                papers_list.append(f"- Title: {p.get('title')}\n  URL: {p.get('url')}")
+            papers_context = "\n".join(papers_list)
+
         prompt = f"""你是一个专业的AI技术分析师。请为以下新闻生成符合报告格式的Markdown内容块。
+
+**候选 arXiv 论文库：**
+{papers_context if papers_context else "(无候选论文)"}
 
 **输出要求：**
 对于每一条新闻，请执行以下操作：
@@ -739,29 +1002,37 @@ class GeminiAIReportAgent:
 
     - **关键点大标题 1**
     （需要详细对关键点进行解释，关键点解释的数量根据要点动态调整）
-        - [关键点解释1]
-        详细解释该技术，不超过200字
-        - [关键点解释2]
-        详细解释该技术，不超过200字
+        - **关键点解释1**
+        （另起一段详细解释该技术，要有具体技术细节，不超过200字）
+        - **关键点解释2**
+        （另起一段详细解释该技术，要有具体技术细节，不超过200字）
         ……
 
     - **关键点大标题 2**
     （需要详细对关键点进行解释，关键点解释的数量根据要点动态调整）
-        - [关键点解释1]
-        详细解释该技术，不超过200字
-        - [关键点解释2]
-        详细解释该技术，不超过200字
+        - **关键点解释1**
+        （另起一段详细解释该技术，要有具体技术细节，不超过200字）
+        - **关键点解释2**
+        （另起一段详细解释该技术，要有具体技术细节，不超过200字）
         ……
 
     - **关键点大标题 3**
     （需要详细对关键点进行解释，关键点解释的数量根据要点动态调整）
-        - [关键点解释1]
-        详细解释该技术，不超过200字
-        - [关键点解释2]
-        详细解释该技术，不超过200字
+        - **关键点解释1**
+        （另起一段详细解释该技术，要有具体技术细节，不超过200字）
+        - **关键点解释2**
+        （另起一段详细解释该技术，要有具体技术细节，不超过200字）   
         ……
     ……
+
+    [相关论文]([URL])
    ```
+
+   **关于 [相关论文] 的特别说明：**
+   - 请在“候选 arXiv 论文库”中查找与当前新闻**高度相关**的论文（标题或内容匹配）。
+   - 如果找到匹配的论文，请将 `[相关论文]([URL])` 替换为实际的论文链接，例如 `[相关论文](https://arxiv.org/abs/2412.xxxxx)`。
+   - 如果有多篇相关，可以列出多行，格式均为 `[相关论文](URL)` 或 `[相关论文: Title](URL)`。
+   - **如果没有找到高度相关的论文，请务必删除 `[相关论文]([URL])` 这一行，不要保留空行或占位符。**
 
 **新闻数据：**
 ```json
@@ -813,19 +1084,20 @@ class GeminiAIReportAgent:
             
         return []
 
-    async def generate_final_report(self, news_items: List[NewsItem], quality_check: bool = True) -> Optional[str]:
+    async def generate_final_report(self, news_items: List[NewsItem], arxiv_papers: List[Dict] = None, quality_check: bool = True) -> Optional[str]:
         """
         生成最终报告 (多轮生成模式)
         
         Args:
             news_items: 排序后的新闻列表
+            arxiv_papers: 相关 arXiv 论文列表
             quality_check: 是否进行质量检查
             
         Returns:
             报告内容
         """
         logger.info("=" * 60)
-        logger.info("【第五步】生成最终报告 (多轮生成模式)...")
+        logger.info("【第六步】生成最终报告 (多轮生成模式)...")
         
         if not news_items:
             logger.warning("没有新闻可以生成报告")
@@ -852,13 +1124,13 @@ class GeminiAIReportAgent:
             logger.info(f"正在生成报告详情：批次 {i // batch_size + 1} (共 {len(batch)} 条)")
             
             # 并发生成该批次的内容
-            entries = await self._generate_news_entries_batch(batch)
+            entries = await self._generate_news_entries_batch(batch, candidate_papers=arxiv_papers)
             if entries:
                 generated_entries.extend(entries)
             else:
                 logger.error(f"批次 {i // batch_size + 1} 生成失败")
 
-        # 3. 组织内容
+        # 3. 组织内容 并 提取已使用的链接
         # 建立 article_id 到 news_item 的映射，方便获取额外信息
         item_map = {item.article_id: item for item in valid_items}
         
@@ -868,14 +1140,40 @@ class GeminiAIReportAgent:
             "Application": []
         }
         
+        # 用于记录在正文中已经出现过的链接，避免在拓展阅读中重复
+        used_urls = set()
+        link_pattern = re.compile(r'\[.*?\]\((https?://.*?)\)')
+        
         for entry in generated_entries:
             cat = entry.get("category", "Model")
             if cat not in category_map:
                 cat = "Model"  # Fallback
-            category_map[cat].append(entry.get("markdown_content", ""))
+            
+            content = entry.get("markdown_content", "")
+            category_map[cat].append(content)
+            
+            # 提取正文中的所有链接
+            found_links = link_pattern.findall(content)
+            for link in found_links:
+                # 简单标准化
+                clean_link = link.strip().rstrip('/')
+                used_urls.add(clean_link)
+                # 针对 arXiv，同时记录 abs 和 pdf 版本以防万一
+                if "arxiv.org/abs/" in clean_link:
+                    used_urls.add(clean_link.replace("/abs/", "/pdf/"))
+                elif "arxiv.org/pdf/" in clean_link:
+                    used_urls.add(clean_link.replace("/pdf/", "/abs/"))
 
         # 4. 生成“本期速览” (Top 10)
         top_items = valid_items[:10]
+        if len(top_items) < 10:
+            # 需要从 C 级中补足，按总分排序取前若干
+            c_pool = [item for item in news_items if item.ranking_level == "C" and item not in top_items]
+            # news_items 在 step4_rank 已按 final_score 排序，这里保持顺序追加
+            for c_item in c_pool:
+                if len(top_items) >= 10:
+                    break
+                top_items.append(c_item)
         overview_prompt = f"""请为以下新闻生成“本期速览”列表。
 要求：
 - 每条新闻用一行 Markdown 列表项表示。
@@ -899,25 +1197,143 @@ class GeminiAIReportAgent:
              if retry_content and "**[[" in retry_content:
                  overview_content = retry_content
 
-        # 5. 生成“拓展阅读” (Reference Links)
-        # 这里收集所有新闻（包括 C 级）的参考链接
+        # 5. 解析“本期速览”标签，构建 标题->标签 映射，便于拓展阅读分组
+        title_tag_map = {}
+        tag_line_pattern = re.compile(r"\*\s+\*\*\[\[(?P<tag>.+?)\]\]\*\*\s+\[\*\*(?P<title>.+?)\*\*\]")
+        for line in overview_content.splitlines():
+            m = tag_line_pattern.search(line)
+            if m:
+                title_tag_map[m.group("title").strip()] = m.group("tag").strip()
+
+        # 建立 article_id -> category 的映射 (用于非 Top 10 新闻的标签回退)
+        id_category_map = {}
+        for entry in generated_entries:
+            cat = entry.get("category", "Model")
+            # 映射英文分类到中文标签
+            cn_cat = {
+                "Infrastructure": "[基础设施]",
+                "Model": "[模型与技术]",
+                "Application": "[应用与智能体]"
+            }.get(cat, "[其他]")
+            id_category_map[entry.get("article_id")] = cn_cat
+
+        # 6. 生成“拓展阅读” (Reference Links)
+        # 这里收集所有新闻（包括 C 级）的参考链接，以及 arXiv 论文
         reference_section = ""
-        all_ref_links = []
-        seen_urls = set()
+        # 候选链接列表，结构: {'markdown': str, 'type': 'arxiv'|'other', 'tag': str}
+        candidates = []
         
+        seen_urls = set(used_urls)
+        used_arxiv_urls = {u for u in used_urls if "arxiv.org" in u}
+        
+        def is_valid_ref_link(url: str, title: str) -> bool:
+            if not url or not title:
+                return False
+            # 过滤社交分享链接
+            if any(x in url for x in ["facebook.com/sharer", "twitter.com/intent", "linkedin.com/share", "reddit.com/submit", "weibo.com", "service.weibo.com"]):
+                return False
+            # 过滤通用主页 (例如 https://blog.google/ )
+            # 简单的启发式：如果 URL 很短或者是根域名，可能不是具体的文章
+            if url.count('/') < 3: 
+                 return False
+            return True
+        
+        # 6.1 收集独立 arXiv 论文
+        if arxiv_papers:
+            for paper in arxiv_papers:
+                url = paper['url']
+                # 如果该论文已在正文中引用，则不放入拓展阅读
+                if url in used_arxiv_urls:
+                    continue
+                    
+                if url not in seen_urls:
+                    candidates.append({
+                        "markdown": f"* [{paper['title']}]({url}) - arXiv",
+                        "type": "arxiv",
+                        "tag": "[前沿研究]"
+                    })
+                    seen_urls.add(url)
+        
+        # 6.2 收集新闻参考链接
         for item in news_items:
-            if item.reference_links:
-                try:
-                    refs = json.loads(item.reference_links)
-                    for ref in refs:
-                        if ref['url'] not in seen_urls:
-                            all_ref_links.append(f"* [{ref['title']}]({ref['url']})")
-                            seen_urls.add(ref['url'])
-                except:
-                    pass
+            if not item.reference_links:
+                continue
+                
+            # 确定标签
+            tag = title_tag_map.get(item.title)
+            if not tag:
+                # 回退到分类
+                tag = id_category_map.get(item.article_id, "[行业动态]")
+            
+            try:
+                refs = json.loads(item.reference_links)
+                for ref in refs:
+                    url = ref.get('url', '')
+                    title = ref.get('title', 'Ref')
+                    
+                    if url and url not in seen_urls and is_valid_ref_link(url, title):
+                        is_arxiv = "arxiv.org" in url
+                        source_tag = f" - {ref.get('type', 'Reference')}"
+                        
+                        candidates.append({
+                            "markdown": f"* [{title}]({url}){source_tag}",
+                            "type": "arxiv" if is_arxiv else "other",
+                            "tag": tag
+                        })
+                        seen_urls.add(url)
+            except:
+                pass
         
-        if all_ref_links:
-            reference_section = "\\n".join(all_ref_links[:30]) # 限制数量防止过长
+        # 6.3 筛选逻辑 (Total 25, Arxiv 15, Other 10)
+        MAX_TOTAL = 25
+        TARGET_ARXIV = 15 # 60%
+        
+        arxiv_candidates = [c for c in candidates if c['type'] == 'arxiv']
+        other_candidates = [c for c in candidates if c['type'] == 'other']
+        
+        final_list = []
+        
+        # 1. 优先取 arXiv
+        take_arxiv = min(len(arxiv_candidates), TARGET_ARXIV)
+        final_list.extend(arxiv_candidates[:take_arxiv])
+        
+        # 2. 填补其他
+        remaining_slots = MAX_TOTAL - len(final_list)
+        take_other = min(len(other_candidates), remaining_slots)
+        final_list.extend(other_candidates[:take_other])
+        
+        # 3. 如果还有空位且有剩余 arXiv，继续填
+        if len(final_list) < MAX_TOTAL and len(arxiv_candidates) > take_arxiv:
+            rest_slots = MAX_TOTAL - len(final_list)
+            final_list.extend(arxiv_candidates[take_arxiv : take_arxiv + rest_slots])
+            
+        # 6.4 按标签分组输出
+        from collections import defaultdict
+        grouped_links = defaultdict(list)
+        for item in final_list:
+            grouped_links[item['tag']].append(item['markdown'])
+            
+        sections = []
+        # 输出 Top 标签 (按速览顺序)
+        sorted_top_tags = []
+        for t in title_tag_map.values():
+            if t not in sorted_top_tags: sorted_top_tags.append(t)
+            
+        for tag in sorted_top_tags:
+            if tag in grouped_links:
+                sections.append(f"### {tag}\n" + chr(10).join(grouped_links[tag]))
+                del grouped_links[tag]
+        
+        # 输出 [前沿研究] (arXiv)
+        if "[前沿研究]" in grouped_links:
+             sections.append(f"### [前沿研究]\n" + chr(10).join(grouped_links["[前沿研究]"]))
+             del grouped_links["[前沿研究]"]
+             
+        # 输出剩余
+        for tag, links in grouped_links.items():
+            sections.append(f"### {tag}\n" + chr(10).join(links))
+            
+        reference_section = "\n\n".join(sections)
 
         # 6. 最终组装
         publish_times = [item.publish_time for item in news_items if item.publish_time]
@@ -956,8 +1372,6 @@ class GeminiAIReportAgent:
 ---
 
 ## 拓展阅读
-
-*(精选相关论文与原始链接)*
 
 {reference_section}
 """
@@ -1153,9 +1567,20 @@ class GeminiAIReportAgent:
         news_items = await self.step4_rank(news_items)
         if save_intermediate:
             self._save_intermediate_results(news_items, "04_ranked")
+            
+        # 6. 获取 arXiv 论文
+        arxiv_papers = await self.step5_fetch_arxiv_papers(news_items)
+        if save_intermediate:
+            # 保存 arXiv 结果（简单包装一下以便复用保存逻辑，或者直接存json）
+            arxiv_output_dir = Path("final_reports") / "intermediate"
+            arxiv_output_dir.mkdir(exist_ok=True, parents=True)
+            arxiv_output_file = arxiv_output_dir / f"05_arxiv_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.json"
+            with open(arxiv_output_file, 'w', encoding='utf-8') as f:
+                json.dump(arxiv_papers, f, ensure_ascii=False, indent=2)
+            logger.info(f"中间结果已保存: {arxiv_output_file}")
         
-        # 6. 生成报告
-        report_content = await self.generate_final_report(news_items, quality_check=True)
+        # 7. 生成报告
+        report_content = await self.generate_final_report(news_items, arxiv_papers=arxiv_papers, quality_check=True)
         
         if report_content:
             # 保存最终报告

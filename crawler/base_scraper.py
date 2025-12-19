@@ -32,6 +32,7 @@ class BaseWebScraper(ABC):
         use_proxy: bool = False,
         timeout: int = 30,
         max_retries: int = 3,
+        http2: bool = False,
     ):
         """
         初始化爬虫
@@ -51,6 +52,7 @@ class BaseWebScraper(ABC):
         self.headers = DEFAULT_HEADERS.copy()
         self.session: Optional[httpx.AsyncClient] = None
         self.proxy_pool = None
+        self.http2 = http2
     
     async def init(self):
         """初始化HTTP客户端"""
@@ -58,7 +60,8 @@ class BaseWebScraper(ABC):
             "headers": self.headers,
             "timeout": self.timeout,
             "verify": False,
-            "follow_redirects": True
+            "follow_redirects": True,
+            "http2": self.http2,
         }
         
         # 如果启用代理，尝试获取代理
@@ -225,7 +228,7 @@ class BaseWebScraper(ABC):
         """
         try:
             if not time_str:
-                logger.warning("Publish time missing.")
+                # logger.warning("Publish time missing.")
                 return None
             
             time_str = time_str.strip()
@@ -260,11 +263,25 @@ class BaseWebScraper(ABC):
                 return int((now - timedelta(days=2)).timestamp())
             
             # ISO 8601格式
-            if 'T' in time_str and 'Z' in time_str:
-                dt = datetime.fromisoformat(time_str.replace('Z', '+00:00'))
-                return int(dt.timestamp())
+            if 'T' in time_str and ('Z' in time_str or '+' in time_str or '-' in time_str):
+                try:
+                    # 尝试直接解析 ISO 格式
+                    dt = datetime.fromisoformat(time_str.replace('Z', '+00:00'))
+                    return int(dt.timestamp())
+                except:
+                    pass
             
-            # 标准日期格式
+            # Month Year (e.g. May 2025)
+            # Default to 1st of month
+            match = re.search(r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})', time_str, re.IGNORECASE)
+            if match:
+                try:
+                    dt = datetime.strptime(match.group(0), '%B %Y')
+                    return int(dt.timestamp())
+                except ValueError:
+                    pass
+
+            # Standard formats
             formats = [
                 '%Y-%m-%d %H:%M:%S',
                 '%Y-%m-%d %H:%M',
@@ -282,17 +299,153 @@ class BaseWebScraper(ABC):
             
             for fmt in formats:
                 try:
-                    dt = datetime.strptime(time_str[:25], fmt)
+                    # 取前25个字符避免过多垃圾字符，但有些格式较长
+                    clean_time_str = time_str[:30].strip()
+                    dt = datetime.strptime(clean_time_str, fmt)
                     return int(dt.timestamp())
                 except ValueError:
                     continue
             
-            logger.warning(f"Failed to parse timestamp: {time_str}")
+            # 宽松匹配：提取数字
+            # 例如 "Oct 12, 2024"
+            try:
+                from dateutil import parser
+                dt = parser.parse(time_str, fuzzy=True)
+                return int(dt.timestamp())
+            except:
+                pass
+
+            # logger.warning(f"Failed to parse timestamp: {time_str}")
             return None
             
         except Exception as e:
             logger.error(f"Error parsing timestamp {time_str}: {e}")
             return None
+
+    def find_publish_time_string(self, soup: BeautifulSoup, content_elem: Optional[BeautifulSoup] = None) -> Optional[str]:
+        """
+        尝试从页面多种位置提取发布时间字符串
+        
+        Args:
+            soup: BeautifulSoup对象
+            content_elem: 文章内容元素（可选）
+            
+        Returns:
+            时间字符串或None
+        """
+        time_str = None
+        
+        # 1. 尝试从JSON-LD提取
+        ld_scripts = soup.find_all('script', type='application/ld+json')
+        for script in ld_scripts:
+            try:
+                if not script.string:
+                    continue
+                data = json.loads(script.string)
+                if isinstance(data, list):
+                    data = data[0]
+                
+                # 递归查找 datePublished
+                def find_date(obj):
+                    if isinstance(obj, dict):
+                        for k, v in obj.items():
+                            if k in ['datePublished', 'dateCreated', 'dateModified']:
+                                return v
+                            if isinstance(v, (dict, list)):
+                                res = find_date(v)
+                                if res: return res
+                    elif isinstance(obj, list):
+                        for item in obj:
+                            res = find_date(item)
+                            if res: return res
+                    return None
+                
+                time_str = find_date(data)
+                if time_str:
+                    logger.debug(f"Found date in JSON-LD: {time_str}")
+                    break
+            except Exception:
+                continue
+        
+        # 2. 尝试从meta标签提取
+        if not time_str:
+            meta_props = [
+                'article:published_time', 
+                'og:updated_time', 
+                'date', 
+                'parsely-pub-date',
+                'publish_date'
+            ]
+            for prop in meta_props:
+                time_elem = soup.find('meta', attrs={'property': prop}) or \
+                           soup.find('meta', attrs={'name': prop})
+                if time_elem:
+                    time_str = time_elem.get('content', '')
+                    if time_str: break
+        
+        # 3. 尝试从time标签提取
+        if not time_str:
+            # 优先查找位于 content_elem 内的time标签
+            time_elem = None
+            if content_elem:
+                time_elem = content_elem.find('time')
+            
+            if not time_elem:
+                # 查找class包含date的元素中的time
+                date_container = soup.find(['div', 'span', 'p'], class_=lambda x: x and 'date' in str(x).lower())
+                if date_container:
+                    time_elem = date_container.find('time')
+            
+            if not time_elem:
+                # 全局查找
+                time_elem = soup.find('time')
+            
+            if time_elem:
+                # 优先使用 datetime 属性
+                dt_attr = time_elem.get('datetime', '')
+                text_content = time_elem.get_text().strip()
+                
+                # 如果datetime属性只包含年月（如May 2025），且文本包含更详细日期，优先用文本
+                if dt_attr and len(dt_attr) < 10 and len(text_content) > len(dt_attr):
+                     time_str = text_content
+                else:
+                    time_str = dt_attr or text_content
+        
+        # 4. Try regex in text
+        if not time_str:
+            # English Month Day, Year
+            date_pattern_en = re.compile(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4}', re.IGNORECASE)
+            # Month Year (e.g. May 2025) - strict to avoid matching random text
+            date_pattern_my = re.compile(r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}', re.IGNORECASE)
+            
+            # Chinese Date
+            date_pattern_cn = re.compile(r'\d{4}年\d{1,2}月\d{1,2}日')
+            # ISO Date
+            date_pattern_iso = re.compile(r'\d{4}-\d{2}-\d{2}')
+
+            patterns = [date_pattern_en, date_pattern_cn, date_pattern_iso, date_pattern_my]
+            
+            # Look in metadata area first
+            meta_area = soup.find(['header', 'div', 'span'], class_=lambda x: x and any(k in str(x).lower() for k in ['meta', 'info', 'date', 'author', 'time']))
+            if meta_area:
+                text = meta_area.get_text()
+                for pattern in patterns:
+                    match = pattern.search(text)
+                    if match:
+                        time_str = match.group(0)
+                        break
+            
+            if not time_str:
+                # 在全文开头查找（前2000字符）
+                text = soup.get_text()[:2000]
+                for pattern in patterns:
+                    match = pattern.search(text)
+                    if match:
+                        time_str = match.group(0)
+                        break
+                        
+        return time_str
+
     
     def extract_reference_links(self, soup: BeautifulSoup, content_elem: Optional[BeautifulSoup]) -> List[Dict]:
         """

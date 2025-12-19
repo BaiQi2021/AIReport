@@ -7,7 +7,6 @@
 -- Table structure for qbitai_article
 -- 量子位文章表：存储从量子位网站爬取的AI相关文章
 -- ----------------------------
-DROP TABLE IF EXISTS `qbitai_article_comment`;
 DROP TABLE IF EXISTS `qbitai_article`;
 
 CREATE TABLE `qbitai_article` (
@@ -39,37 +38,11 @@ CREATE TABLE `qbitai_article` (
     KEY `idx_qbitai_article_time` (`publish_time`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='量子位文章表';
 
--- ----------------------------
--- Table structure for qbitai_article_comment
--- 量子位文章评论表：存储文章评论信息
--- ----------------------------
-CREATE TABLE `qbitai_article_comment` (
-    `id` int NOT NULL AUTO_INCREMENT COMMENT '自增ID',
-    `comment_id` varchar(255) NOT NULL COMMENT '评论唯一ID',
-    `article_id` varchar(255) NOT NULL COMMENT '对应的文章ID',
-    `user_name` varchar(255) DEFAULT NULL COMMENT '评论者用户名',
-    `user_avatar` varchar(512) DEFAULT NULL COMMENT '评论者头像URL',
-    `content` text NOT NULL COMMENT '评论内容',
-    `publish_time` bigint DEFAULT NULL COMMENT '发布时间戳',
-    `publish_date` varchar(10) DEFAULT NULL COMMENT '发布日期(YYYY-MM-DD)',
-    `like_count` int DEFAULT 0 COMMENT '点赞数',
-    `sub_comment_count` int DEFAULT 0 COMMENT '子评论数',
-    `parent_comment_id` varchar(255) DEFAULT NULL COMMENT '父评论ID(回复评论时)',
-    `add_ts` bigint NOT NULL COMMENT '记录添加时间戳',
-    `last_modify_ts` bigint NOT NULL COMMENT '记录最后修改时间戳',
-    PRIMARY KEY (`id`),
-    UNIQUE KEY `idx_qbitai_comment_unique` (`comment_id`),
-    KEY `idx_qbitai_comment_article` (`article_id`),
-    KEY `idx_qbitai_comment_date` (`publish_date`),
-    CONSTRAINT `fk_qbitai_comment_article` FOREIGN KEY (`article_id`) REFERENCES `qbitai_article`(`article_id`) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='量子位文章评论表';
-
 -- ===============================
 -- 索引优化
 -- ===============================
 -- 为常用查询优化添加复合索引
 CREATE INDEX `idx_article_date_category` ON `qbitai_article` (`publish_date`, `category`);
-CREATE INDEX `idx_comment_article_date` ON `qbitai_article_comment` (`article_id`, `publish_date`);
 
 -- ===============================
 -- 数据库配置说明
