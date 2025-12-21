@@ -292,6 +292,11 @@ class GeminiAIReportAgent:
         """
         logger.info("=" * 60)
         logger.info("【第一步】开始过滤 (Filtering)...")
+        logger.info(f"操作前：共 {len(news_items)} 条新闻")
+        if news_items:
+            logger.info("操作前标题列表（前10条）：")
+            for idx, item in enumerate(news_items[:10], 1):
+                logger.info(f"  [{idx}] {item.title[:60]}... (来源: {item.source})")
 
         items_to_delete = []
 
@@ -309,6 +314,7 @@ class GeminiAIReportAgent:
         
         # 删除预过滤掉的数据
         if items_to_delete:
+            logger.info(f"预过滤阶段：剔除 {len(items_to_delete)} 条（内容过少），剩余 {len(valid_news_items)} 条")
             await self._delete_articles_from_db(items_to_delete)
             items_to_delete = [] # 清空列表以便复用
 
@@ -380,6 +386,8 @@ class GeminiAIReportAgent:
                 if results:
                     # 更新新闻条目
                     result_map = {r["article_id"]: r for r in results}
+                    batch_kept = []
+                    batch_rejected = []
                     for item in batch:
                         if item.article_id in result_map:
                             r = result_map[item.article_id]
@@ -388,8 +396,17 @@ class GeminiAIReportAgent:
                             
                             if item.filter_decision == "保留":
                                 filtered_items.append(item)
+                                batch_kept.append(item)
                             else:
                                 rejected_items.append(item)
+                                batch_rejected.append(item)
+                    
+                    # 输出批次处理结果
+                    logger.info(f"  批次结果：保留 {len(batch_kept)} 条，剔除 {len(batch_rejected)} 条")
+                    if batch_rejected:
+                        logger.info(f"  剔除的标题：")
+                        for item in batch_rejected:
+                            logger.info(f"    - {item.title[:60]}... (理由: {item.filter_reason})")
                     break
                 else:
                     logger.warning(f"批次 {i // batch_size + 1} 解析失败，重试 {retry + 1}/{self.max_retries}")
@@ -403,8 +420,15 @@ class GeminiAIReportAgent:
         if rejected_items:
             logger.info(f"正在删除 {len(rejected_items)} 条被过滤的新闻...")
             await self._delete_articles_from_db(rejected_items)
-            
+        
+        logger.info("=" * 60)
         logger.info(f"过滤完成：保留 {len(filtered_items)}/{len(news_items)} 条新闻")
+        logger.info(f"操作后：共 {len(filtered_items)} 条新闻")
+        if filtered_items:
+            logger.info("操作后保留的标题列表（前10条）：")
+            for idx, item in enumerate(filtered_items[:10], 1):
+                logger.info(f"  [{idx}] {item.title[:60]}... (来源: {item.source})")
+        logger.info("=" * 60)
         return filtered_items
     
     async def step2_cluster(self, news_items: List[NewsItem], batch_size: int = 30) -> List[NewsItem]:
@@ -421,6 +445,11 @@ class GeminiAIReportAgent:
         """
         logger.info("=" * 60)
         logger.info("【第二步】开始归类 (Clustering)...")
+        logger.info(f"操作前：共 {len(news_items)} 条新闻")
+        if news_items:
+            logger.info("操作前标题列表（前10条）：")
+            for idx, item in enumerate(news_items[:10], 1):
+                logger.info(f"  [{idx}] {item.title[:60]}... (来源: {item.source})")
         logger.info(f"待处理新闻数: {len(news_items)}")
         
         # 分批处理
@@ -486,6 +515,7 @@ class GeminiAIReportAgent:
                 if results:
                     # 更新新闻条目
                     result_map = {r["article_id"]: r for r in results}
+                    batch_events = {}
                     for item in batch:
                         if item.article_id in result_map:
                             event_id = result_map[item.article_id].get("event_id")
@@ -494,6 +524,18 @@ class GeminiAIReportAgent:
                             if event_id not in all_events:
                                 all_events[event_id] = []
                             all_events[event_id].append(item)
+                            
+                            # 记录批次内的事件
+                            if event_id not in batch_events:
+                                batch_events[event_id] = []
+                            batch_events[event_id].append(item)
+                    
+                    # 输出批次归类结果
+                    logger.info(f"  批次归类结果：识别出 {len(batch_events)} 个事件")
+                    for event_id, items in sorted(batch_events.items(), key=lambda x: len(x[1]), reverse=True):
+                        logger.info(f"    - {event_id}: {len(items)} 条新闻")
+                        for item in items[:3]:  # 只显示前3条标题
+                            logger.info(f"      * {item.title[:50]}...")
                     break
                 else:
                     logger.warning(f"批次 {i // batch_size + 1} 解析失败，重试 {retry + 1}/{self.max_retries}")
@@ -508,9 +550,17 @@ class GeminiAIReportAgent:
             for item in items:
                 item.event_count = count
         
+        logger.info("=" * 60)
         logger.info(f"归类完成：识别出 {len(all_events)} 个独立事件")
-        for event_id, items in sorted(all_events.items(), key=lambda x: len(x[1]), reverse=True)[:10]:
+        logger.info(f"操作后：共 {len(news_items)} 条新闻，归类为 {len(all_events)} 个事件")
+        for event_id, items in sorted(all_events.items(), key=lambda x: len(x[1]), reverse=True):
             logger.info(f"  - {event_id}: {len(items)} 条新闻")
+            # 显示该事件下的标题示例
+            for idx, item in enumerate(items[:3], 1):
+                logger.info(f"    [{idx}] {item.title[:60]}...")
+            if len(items) > 3:
+                logger.info(f"    ... 还有 {len(items) - 3} 条")
+        logger.info("=" * 60)
         
         return news_items
     
@@ -527,6 +577,7 @@ class GeminiAIReportAgent:
         """
         logger.info("=" * 60)
         logger.info("【第三步】开始去重 (Deduplication)...")
+        logger.info(f"操作前：共 {len(news_items)} 条新闻")
         
         # 按 event_id 分组
         events = defaultdict(list)
@@ -547,6 +598,9 @@ class GeminiAIReportAgent:
                 continue
             
             logger.info(f"处理事件: {event_id} ({len(items)} 条新闻)")
+            logger.info(f"  事件内标题列表：")
+            for idx, item in enumerate(items, 1):
+                logger.info(f"    [{idx}] {item.title[:60]}... (来源: {item.source})")
             
             # 构建提示词
             batch_data = []
@@ -599,6 +653,8 @@ class GeminiAIReportAgent:
                 
                 if results:
                     result_map = {r["article_id"]: r for r in results}
+                    event_kept = []
+                    event_deleted = []
                     for item in items:
                         if item.article_id in result_map:
                             r = result_map[item.article_id]
@@ -607,8 +663,21 @@ class GeminiAIReportAgent:
                             
                             if item.dedup_decision == "保留":
                                 deduplicated_items.append(item)
+                                event_kept.append(item)
                             else:
                                 deleted_items.append(item)
+                                event_deleted.append(item)
+                    
+                    # 输出事件去重结果
+                    logger.info(f"  去重结果：保留 {len(event_kept)} 条，删除 {len(event_deleted)} 条")
+                    if event_kept:
+                        logger.info(f"  保留的标题：")
+                        for item in event_kept:
+                            logger.info(f"    ✓ {item.title[:60]}... (理由: {item.dedup_reason})")
+                    if event_deleted:
+                        logger.info(f"  删除的标题：")
+                        for item in event_deleted:
+                            logger.info(f"    ✗ {item.title[:60]}... (理由: {item.dedup_reason})")
                     break
                 else:
                     logger.warning(f"事件 {event_id} 去重失败，重试 {retry + 1}/{self.max_retries}")
@@ -626,8 +695,16 @@ class GeminiAIReportAgent:
         if deleted_items:
             logger.info(f"正在删除 {len(deleted_items)} 条重复新闻...")
             await self._delete_articles_from_db(deleted_items)
-            
+        
+        logger.info("=" * 60)
         logger.info(f"去重完成：保留 {len(deduplicated_items)}/{len(news_items)} 条新闻")
+        logger.info(f"操作后：共 {len(deduplicated_items)} 条新闻")
+        if deduplicated_items:
+            logger.info("操作后保留的标题列表（前10条）：")
+            for idx, item in enumerate(deduplicated_items[:10], 1):
+                logger.info(f"  [{idx}] {item.title[:60]}... (事件: {item.event_id}, 来源: {item.source})")
+        logger.info("=" * 60)
+        
         return deduplicated_items
     
     async def step4_rank(self, news_items: List[NewsItem], batch_size: int = 20) -> List[NewsItem]:
@@ -644,6 +721,11 @@ class GeminiAIReportAgent:
         """
         logger.info("=" * 60)
         logger.info("【第四步】开始排序 (Ranking)...")
+        logger.info(f"操作前：共 {len(news_items)} 条新闻")
+        if news_items:
+            logger.info("操作前标题列表（前10条）：")
+            for idx, item in enumerate(news_items[:10], 1):
+                logger.info(f"  [{idx}] {item.title[:60]}... (事件: {item.event_id})")
         logger.info(f"待评分新闻数: {len(news_items)}")
         
         # 分批处理
@@ -741,6 +823,13 @@ class GeminiAIReportAgent:
                                 item.ranking_level = "B"
                             else:
                                 item.ranking_level = "C"
+                    
+                    # 输出批次评分结果
+                    logger.info(f"  批次评分结果：")
+                    for item in sorted(batch, key=lambda x: x.final_score, reverse=True):
+                        logger.info(f"    [{item.ranking_level}] {item.title[:50]}... "
+                                  f"(评分: {item.final_score:.2f}, "
+                                  f"技术:{item.tech_impact}, 行业:{item.industry_scope}, 热度:{item.hype_score})")
                     break
                 else:
                     logger.warning(f"批次 {i // batch_size + 1} 评分失败，重试 {retry + 1}/{self.max_retries}")
@@ -752,11 +841,18 @@ class GeminiAIReportAgent:
         # 按评分排序
         news_items.sort(key=lambda x: x.final_score, reverse=True)
         
+        logger.info("=" * 60)
         logger.info(f"排序完成：")
+        logger.info(f"操作后：共 {len(news_items)} 条新闻")
         logger.info(f"  S级: {sum(1 for x in news_items if x.ranking_level == 'S')} 条")
         logger.info(f"  A级: {sum(1 for x in news_items if x.ranking_level == 'A')} 条")
         logger.info(f"  B级: {sum(1 for x in news_items if x.ranking_level == 'B')} 条")
         logger.info(f"  C级: {sum(1 for x in news_items if x.ranking_level == 'C')} 条")
+        logger.info("操作后排序结果（前10条）：")
+        for idx, item in enumerate(news_items[:10], 1):
+            logger.info(f"  [{idx}] [{item.ranking_level}] {item.title[:60]}... "
+                      f"(评分: {item.final_score:.2f}, 事件: {item.event_id})")
+        logger.info("=" * 60)
         
         return news_items
 
