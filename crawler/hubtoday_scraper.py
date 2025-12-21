@@ -221,10 +221,17 @@ async def run_crawler(days=3):
         
         for article_item in articles:
             try:
-                # Check date
-                if article_item.get('publish_date') and article_item['publish_date'] < str(start_date.date()):
-                     logger.info(f"Article {article_item['article_id']} too old")
-                     continue
+                # Check date - 使用日期对象比较而不是字符串比较
+                article_date_str = article_item.get('publish_date')
+                if article_date_str:
+                    try:
+                        article_date = datetime.strptime(article_date_str, '%Y-%m-%d').date()
+                        if article_date < start_date.date():
+                            logger.info(f"Article {article_item['article_id']} too old")
+                            continue
+                    except ValueError:
+                        logger.warning(f"Invalid date format for article {article_item['article_id']}: {article_date_str}")
+                        continue
 
                 article = await scraper.get_article_detail(
                     article_item['article_id'],

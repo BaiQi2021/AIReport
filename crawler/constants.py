@@ -145,7 +145,7 @@ CRAWLER_CONFIGS: List[Dict] = [
         'enabled': True,
         'priority': 1,
         'description': 'AI专业媒体',
-        'db_table': 'qbitai_article',
+        'db_table': 'jiqizhixin_article',
     },
     
     # AI工具爬虫（示例配置，可扩展）
