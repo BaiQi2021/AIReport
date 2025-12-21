@@ -18,7 +18,6 @@ crawler/
 ├── openai_scraper.py        # OpenAI爬虫
 ├── ai_companies_scraper.py  # NVIDIA等公司爬虫
 ├── qbitai_scraper.py        # 量子位爬虫
-├── news_scraper.py          # 新闻媒体爬虫
 └── ai_tools_scraper.py      # AI工具爬虫
 ```
 

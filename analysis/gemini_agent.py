@@ -1057,7 +1057,7 @@ all:"Large Language Model" AND all:Reasoning
             优先级最高的 URL
         """
         # 如果新闻本身来自官方源（非量子位等二手媒体），直接返回
-        non_official_sources = ["量子位", "qbitai", "36kr", "机器之心", "新智元"]
+        non_official_sources = ["量子位", "qbitai", "36kr", "新智元"]
         if item.source and not any(s.lower() in item.source.lower() for s in non_official_sources):
             return item.url
         

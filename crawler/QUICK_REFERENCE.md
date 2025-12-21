@@ -159,7 +159,6 @@ crawler/
 ├── openai_scraper.py
 ├── ai_companies_scraper.py
 ├── qbitai_scraper.py
-├── news_scraper.py
 └── ai_tools_scraper.py
 ```
 

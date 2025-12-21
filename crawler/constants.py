@@ -135,18 +135,6 @@ CRAWLER_CONFIGS: List[Dict] = [
         'description': '国内主要AI科技新闻媒体',
         'db_table': 'qbitai_article',
     },
-    {
-        'key': 'jiqizhixin',
-        'name': '机器之心',
-        'module': 'crawler.news_scraper',
-        'class': 'JiqizhixinScraper',
-        'runner': 'run_jiqizhixin_crawler',
-        'type': 'news',
-        'enabled': True,
-        'priority': 1,
-        'description': 'AI专业媒体',
-        'db_table': 'jiqizhixin_article',
-    },
     
     # AI工具爬虫（示例配置，可扩展）
     {
