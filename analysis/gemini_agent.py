@@ -1095,7 +1095,7 @@ all:"Large Language Model" AND all:Reasoning
    
    **模板格式：**
    ```markdown
-   ### **[事件标题 - 基于主标题优化]**
+   ### **[事件标题 - 基于主标题优化（尽量不超过8个字）]**
    
    [阅读原文]([primary_url])  `[Publish_Time]`
    
@@ -1334,7 +1334,7 @@ all:"Large Language Model" AND all:Reasoning
             
         return []
 
-    async def generate_final_report(self, news_items: List[NewsItem], arxiv_papers: List[Dict] = None, quality_check: bool = True, days: int = 7) -> Optional[str]:
+    async def generate_final_report(self, news_items: List[NewsItem], arxiv_papers: List[Dict] = None, quality_check: bool = True, days: int = 7, target_count: int = 10) -> Optional[str]:
         """
         生成最终报告 (多轮生成模式)
         
@@ -1343,6 +1343,7 @@ all:"Large Language Model" AND all:Reasoning
             arxiv_papers: 相关 arXiv 论文列表
             quality_check: 是否进行质量检查
             days: 报告覆盖的天数范围
+            target_count: 报告条目数量（速览条目和报告内标题数量）
             
         Returns:
             报告内容
@@ -1376,8 +1377,7 @@ all:"Large Language Model" AND all:Reasoning
         # 按事件分数排序
         event_representatives.sort(key=lambda x: x["event_score"], reverse=True)
         
-        # 取前10个事件
-        target_count = 10
+        # 取前 target_count 个事件
         top_events = event_representatives[:target_count]
         
         logger.info(f"共识别 {len(event_groups)} 个独立事件，将为前 {len(top_events)} 个事件生成详细报告")
@@ -1793,13 +1793,14 @@ all:"Large Language Model" AND all:Reasoning
         
         return True
     
-    async def run(self, days: int = 3, save_intermediate: bool = True) -> Optional[str]:
+    async def run(self, days: int = 3, save_intermediate: bool = True, report_count: int = 10) -> Optional[str]:
         """
         运行完整的处理流程
         
         Args:
             days: 获取最近N天的数据
             save_intermediate: 是否保存中间结果
+            report_count: 报告条目数量（速览条目和报告内标题数量）
             
         Returns:
             最终报告内容
@@ -1848,7 +1849,7 @@ all:"Large Language Model" AND all:Reasoning
             logger.info(f"中间结果已保存: {arxiv_output_file}")
         
         # 7. 生成报告
-        report_content = await self.generate_final_report(news_items, arxiv_papers=arxiv_papers, quality_check=True, days=days)
+        report_content = await self.generate_final_report(news_items, arxiv_papers=arxiv_papers, quality_check=True, days=days, target_count=report_count)
         
         if report_content:
             # 保存最终报告

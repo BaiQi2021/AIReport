@@ -29,6 +29,7 @@ async def main():
     parser.add_argument("--use-proxy", action="store_true", help="Enable proxy pool")
     parser.add_argument("--use-agent", action="store_true", help="Deprecated: Agent is now enabled by default")
     parser.add_argument("--save-intermediate", action="store_true", help="Save intermediate results during agent processing")
+    parser.add_argument("--report-count", type=int, default=10, help="Number of report entries (quick view items and report titles, default: 10)")
     
     args = parser.parse_args()
 
@@ -65,7 +66,7 @@ async def main():
         logger.info("🤖 使用 GeminiAIReportAgent 进行智能分析...")
         try:
             agent = GeminiAIReportAgent(max_retries=2)
-            await agent.run(days=args.days, save_intermediate=args.save_intermediate)
+            await agent.run(days=args.days, save_intermediate=args.save_intermediate, report_count=args.report_count)
         except Exception as e:
             logger.error(f"Agent 运行失败: {e}")
 
