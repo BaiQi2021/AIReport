@@ -18,7 +18,7 @@ from sqlalchemy import select, func, desc
 
 # Page Config
 st.set_page_config(
-    page_title="AI小报 - 智能报告生成平台",
+    page_title="AI小报",
     page_icon="🤖",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -115,11 +115,63 @@ async def get_db_stats():
             "Total": qbitai_count + company_count + aibase_count
         }
 
+def update_data_preview(container, items, stage):
+    """Helper to update the data preview section dynamically"""
+    if not items:
+        return
+        
+    with container.container():
+        st.subheader(f"📊 数据预览: {stage}")
+        
+        data = []
+        for item in items:
+            row = {
+                "Title": item.title,
+                "Source": item.source,
+                "Date": datetime.fromtimestamp(item.publish_time).strftime('%Y-%m-%d'),
+                "Link": item.url
+            }
+            
+            if stage == "Filtering":
+                row["Decision"] = item.filter_decision
+                row["Reason"] = item.filter_reason
+            elif stage == "Clustering":
+                row["Event ID"] = item.event_id
+            elif stage == "Deduplication":
+                row["Event ID"] = item.event_id
+                row["Decision"] = item.dedup_decision
+                row["Reason"] = item.dedup_reason
+            elif stage == "Ranking":
+                row["Score"] = f"{item.final_score:.2f}" if item.final_score else "0.00"
+                row["Tech"] = item.tech_impact
+                row["Ind"] = item.industry_scope
+                row["Hype"] = item.hype_score
+            
+            data.append(row)
+        
+        df = pd.DataFrame(data)
+        
+        # Configure columns based on stage
+        column_config = {
+            "Link": st.column_config.LinkColumn("Link"),
+        }
+        
+        if stage == "Ranking":
+            column_config["Score"] = st.column_config.NumberColumn("Score", format="%.2f")
+            
+        st.dataframe(
+            df,
+            column_config=column_config,
+            use_container_width=True,
+            hide_index=True
+        )
+
 async def generate_report_step_by_step(days, report_count, custom_instructions=""):
     await init_db()
     agent = GeminiAIReportAgent()
     
     status_container = st.status("正在生成报告...", expanded=True)
+    preview_placeholder = st.empty()
     
     with status_container:
         st.write("📥 正在从数据库获取数据...")
@@ -128,6 +180,9 @@ async def generate_report_step_by_step(days, report_count, custom_instructions="
             st.error("未找到数据！")
             return None
         st.info(f"✅ 获取到 {len(news_items)} 条原始数据")
+        
+        # Update Preview: Raw Data
+        update_data_preview(preview_placeholder, news_items, "Raw Data")
         
         # Visualization: Raw Data Distribution
         sources = [item.source for item in news_items]
@@ -138,17 +193,29 @@ async def generate_report_step_by_step(days, report_count, custom_instructions="
         filtered_items = await agent.step1_filter(news_items)
         st.info(f"✅ 过滤后剩余: {len(filtered_items)} 条 (剔除 {len(news_items) - len(filtered_items)} 条)")
         
+        # Update Preview: Filtered Data
+        update_data_preview(preview_placeholder, news_items, "Filtering") # Show all items to see what was filtered
+        
         st.write("🧩 正在进行归类 (Clustering)...")
         clustered_items = await agent.step2_cluster(filtered_items)
         st.info(f"✅ 归类完成")
+
+        # Update Preview: Clustered Data
+        update_data_preview(preview_placeholder, clustered_items, "Clustering")
 
         st.write("🧹 正在进行去重 (Deduplication)...")
         deduped_items = await agent.step3_deduplicate(clustered_items)
         st.info(f"✅ 去重后剩余: {len(deduped_items)} 条")
 
+        # Update Preview: Deduplicated Data
+        update_data_preview(preview_placeholder, clustered_items, "Deduplication") # Show clustered items to see what was deduped
+
         st.write("🏆 正在进行评分排序 (Ranking)...")
         ranked_items = await agent.step4_rank(deduped_items)
         st.info(f"✅ 排序完成")
+        
+        # Update Preview: Ranked Data
+        update_data_preview(preview_placeholder, ranked_items, "Ranking")
         
         # Visualization: Funnel
         funnel_data = {
