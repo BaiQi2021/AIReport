@@ -79,7 +79,7 @@ class BaaiHubScraper(BaseWebScraper):
                         'url': url,
                         'publish_date': publish_date,
                         'description': info.get('summary'),
-                        'source_keyword': None
+                        'source_keyword': 'baai_hub'
                     })
             
             logger.info(f"Extracted {len(articles)} BAAI Hub articles from API")
@@ -254,13 +254,30 @@ class BaaiHubScraper(BaseWebScraper):
                 # The base scraper usually expects text, but HTML is fine if we want to preserve structure.
                 # Let's convert to text to be consistent with other scrapers
                 soup = BeautifulSoup(content, 'html.parser')
+                
+                # Extract reference links
+                reference_links = []
+                for a in soup.find_all('a', href=True):
+                    href = a['href']
+                    if href.startswith('http'):
+                        reference_links.append(href)
+                
                 content = soup.get_text("\n", strip=True)
+                
+                # Extract links from text content
+                text_urls = self._extract_urls_from_text(content)
+                for url in text_urls:
+                    if url not in reference_links:
+                        reference_links.append(url)
+            else:
+                reference_links = []
 
             return {
                 'title': title,
                 'content': content,
                 'publish_date': publish_date,
-                'source_keyword': None
+                'source_keyword': 'baai_hub',
+                'reference_links': reference_links
             }
             
         except Exception as e:
@@ -325,6 +342,86 @@ class BaaiHubScraper(BaseWebScraper):
             except:
                 return token # Return as string if unknown
 
+    def _extract_urls_from_text(self, text: str) -> List[str]:
+        """Extract URLs from text using regex."""
+        if not text:
+            return []
+        
+        # Regex for URL extraction
+        # Matches http/https URLs, handling common punctuation at the end
+        url_pattern = r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
+        urls = re.findall(url_pattern, text)
+        
+        # Clean up URLs (remove trailing punctuation that might have been matched)
+        cleaned_urls = []
+        for url in urls:
+            # Remove trailing punctuation often found in text
+            url = url.rstrip('.,;:)!>]')
+            
+            # Filter out WeChat links
+            if 'mp.weixin.qq.com' in url:
+                continue
+                
+            if url not in cleaned_urls:
+                cleaned_urls.append(url)
+                
+        return cleaned_urls
+
+    def _parse_weixin_detail(self, html: str) -> Optional[Dict]:
+        """Parse WeChat article detail."""
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+            
+            # Title
+            title = ""
+            title_tag = soup.find('h1', class_='rich_media_title')
+            if title_tag:
+                title = title_tag.get_text(strip=True)
+            
+            # Content
+            content = ""
+            content_div = soup.find('div', id='js_content')
+            
+            reference_links = []
+            if content_div:
+                # Extract links from <a> tags
+                for a in content_div.find_all('a', href=True):
+                    href = a['href']
+                    if href.startswith('http') and 'mp.weixin.qq.com' not in href:
+                        reference_links.append(href)
+                
+                content = content_div.get_text("\n", strip=True)
+                
+                # Extract links from text content
+                text_urls = self._extract_urls_from_text(content)
+                for url in text_urls:
+                    if url not in reference_links:
+                        reference_links.append(url)
+            
+            # Publish Date
+            publish_date = None
+            # Try to find publish_time in scripts
+            # var ct = "1703212345";
+            scripts = soup.find_all('script')
+            for script in scripts:
+                if script.string:
+                    match = re.search(r'ct\s*=\s*"(\d+)"', script.string)
+                    if match:
+                        timestamp = int(match.group(1))
+                        publish_date = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+                        break
+            
+            return {
+                'title': title,
+                'content': content,
+                'publish_date': publish_date,
+                'source_keyword': 'baai_hub',
+                'reference_links': reference_links
+            }
+        except Exception as e:
+            logger.error(f"Error parsing WeChat detail: {e}")
+            return None
+
     async def get_article_detail(self, article_id: str, url: str) -> Optional[Dict]:
         """Get article detail."""
         logger.info(f"Fetching article detail: {url}")
@@ -334,6 +431,13 @@ class BaaiHubScraper(BaseWebScraper):
             
         # Fix encoding if needed (BAAI Hub detail pages sometimes return ISO-8859-1)
         html = self._fix_encoding(html)
+        
+        # Check if it is a WeChat article
+        if 'weixin.qq.com' in url:
+            weixin_detail = self._parse_weixin_detail(html)
+            if weixin_detail and weixin_detail.get('content'):
+                logger.info("Successfully parsed detail from WeChat")
+                return weixin_detail
             
         # 1. Try to parse Nuxt data first
         nuxt_detail = self._parse_nuxt_detail(html)
@@ -353,6 +457,8 @@ class BaaiHubScraper(BaseWebScraper):
         # Content
         # Try to find the main content area
         content = ""
+        reference_links = []
+        
         # Common classes for content
         content_classes = ['article-content', 'post-content', 'detail-content', 'content', 'main-text', 'post-content']
         content_div = soup.find('div', class_=re.compile('|'.join(content_classes), re.I))
@@ -374,7 +480,19 @@ class BaaiHubScraper(BaseWebScraper):
             content_div = best_div
             
         if content_div:
+            # Extract links
+            for a in content_div.find_all('a', href=True):
+                href = a['href']
+                if href.startswith('http') and 'mp.weixin.qq.com' not in href:
+                    reference_links.append(href)
+            
             content = content_div.get_text("\n", strip=True)
+            
+            # Extract links from text content
+            text_urls = self._extract_urls_from_text(content)
+            for url in text_urls:
+                if url not in reference_links:
+                    reference_links.append(url)
         else:
             # Last resort: body text
             content = soup.body.get_text("\n", strip=True) if soup.body else ""
@@ -393,7 +511,8 @@ class BaaiHubScraper(BaseWebScraper):
             'title': title,
             'content': content,
             'publish_date': publish_date,
-            'source_keyword': source_keyword # Might be None if not found
+            'source_keyword': 'baai_hub', # Might be None if not found
+            'reference_links': reference_links
         }
 
     def _fix_encoding(self, text: str) -> str:

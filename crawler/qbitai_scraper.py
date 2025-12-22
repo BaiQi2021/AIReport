@@ -208,6 +208,9 @@ class QbitaiWebScraper:
             img_elem = soup.find('img', class_=re.compile(r'cover|featured', re.I))
             article['cover_image'] = img_elem.get('src') if img_elem else ''
             
+            # Source Keyword
+            article['source_keyword'] = 'qbitai'
+            
             # Metrics (default 0)
             article['read_count'] = 0
             article['like_count'] = 0

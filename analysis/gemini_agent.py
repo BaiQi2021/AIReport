@@ -1190,6 +1190,63 @@ all:"Large Language Model" AND all:Reasoning
         
         return item.url
 
+    def _strict_format_check_agent(self, content: str) -> Tuple[bool, str]:
+        """
+        使用 LLM 进行严格的格式检查
+        """
+        check_prompt = f"""请严格检查以下 Markdown 内容是否完全符合指定的格式模板。
+
+**待检查内容：**
+```markdown
+{content}
+```
+
+**标准模板格式：**
+```markdown
+### **[标题]**
+
+[阅读原文]([URL])  `[YYYY-MM-DD]`
+
+> **概要**: [内容]
+
+**💡内容详解**
+
+- **[关键点大标题]**
+    - **[关键点解释]**
+    ...
+
+[相关论文]([URL])
+```
+
+**检查规则：**
+1. **标题**：必须以 `### **` 开头，`**` 结尾。
+2. **阅读原文**：
+   - 此行是**可选的**。
+   - 如果存在，必须是 `[阅读原文](URL)  `[YYYY-MM-DD]` ` 格式。
+   - 如果不存在，则直接开始概要。
+   - **注意**：不能只出现日期而没有 `[阅读原文](URL)`，URL不要出现量子位、36kr、qq.com 等非官方源。
+3. **概要**：必须以 `> **概要**:` 开头。
+4. **内容详解**：必须包含 `**💡内容详解**` 标题。
+5. **关键点**：必须包含至少一个关键点大标题（`- **...**`）和解释。
+6. **相关论文**：
+   - 如果有论文链接，必须是 `[相关论文](URL)` 格式。
+   - 如果没有论文链接，**绝对不能**出现 `[相关论文]` 字样或空行。
+7. **纯净度**：不应包含 "Here is the report" 或其他聊天内容。
+
+**输出要求：**
+- 如果格式完全正确，请只输出 "PASS"。
+- 如果有错误，请输出 "FAIL: [具体错误原因]"。
+"""
+        try:
+            response = self._call_llm(check_prompt, temperature=0.0)
+            if "PASS" in response:
+                return True, ""
+            else:
+                return False, response.replace("FAIL:", "").strip()
+        except Exception as e:
+            logger.error(f"格式检查 Agent 调用失败: {e}")
+            return True, ""
+
     async def _generate_event_entries_batch(self, batch_events: List[Dict], candidate_papers: List[Dict] = None, custom_instructions: str = "") -> List[Dict[str, str]]:
         """
         按事件生成报告条目（每个事件综合其下所有新闻）
@@ -1235,7 +1292,7 @@ all:"Large Language Model" AND all:Reasoning
                     except:
                         pass
             
-            pub_date = datetime.fromtimestamp(best_item.publish_time).strftime('%Y-%m-%d %H:%M')
+            pub_date = datetime.fromtimestamp(best_item.publish_time).strftime('%Y-%m-%d')
             
             batch_data.append({
                 "event_id": event_id,
@@ -1327,8 +1384,8 @@ all:"Large Language Model" AND all:Reasoning
 
    **关于 [阅读原文] 的特别说明：**
    - 必须使用提供的 primary_url，这是优先级最高的官方核心信源
-   - **重要：** 如果 primary_url 包含 "qbitai.com"、"量子位" 或 "36kr"，请**不要生成** [阅读原文] 这一行，直接开始引用块 (> **概要**...)
-   - **重要：** 如果 primary_url 是论文链接（如包含 "arxiv.org", "openreview.net", "huggingface.co/papers"），请**不要生成** [阅读原文] 这一行，确保该链接出现在 [相关论文] 中。
+   - **重要：** 如果 primary_url 包含 "qbitai.com"、"qq.com"、"量子位" 或 "36kr"，请**不要生成** [阅读原文] 这一行（包括日期），直接开始引用块 (> **概要**...)
+   - **重要：** 如果 primary_url 是论文链接（如包含 "arxiv.org", "openreview.net", "huggingface.co/papers"），请**不要生成** [阅读原文] 这一行（包括日期），确保该链接出现在 [相关论文] 中。
    - 禁止使用量子位、36kr等二手媒体链接
 
    **关于 [相关论文] 的特别说明：**
@@ -1366,11 +1423,18 @@ all:"Large Language Model" AND all:Reasoning
                 valid_results = []
                 errors = []
                 for item in results:
+                    # 1. 基础正则检查
                     is_valid, error = self._validate_news_item_format(item.get("markdown_content", ""))
-                    if is_valid:
+                    if not is_valid:
+                        errors.append(f"事件 '{item.get('event_id', 'Unknown')}' 基础格式错误: {error}")
+                        continue
+                    
+                    # 2. LLM 严格检查
+                    is_strict_valid, strict_error = self._strict_format_check_agent(item.get("markdown_content", ""))
+                    if is_strict_valid:
                         valid_results.append(item)
                     else:
-                        errors.append(f"事件 '{item.get('event_id', 'Unknown')}' 格式错误: {error}")
+                        errors.append(f"事件 '{item.get('event_id', 'Unknown')}' 严格格式错误: {strict_error}")
                 
                 if not errors:
                     return valid_results
@@ -1400,7 +1464,7 @@ all:"Large Language Model" AND all:Reasoning
         """
         batch_data = []
         for item in batch_items:
-            pub_date = datetime.fromtimestamp(item.publish_time).strftime('%Y-%m-%d %H:%M')
+            pub_date = datetime.fromtimestamp(item.publish_time).strftime('%Y-%m-%d')
             
             # 获取优先级最高的官方信源 URL
             primary_url = self._get_primary_source_url(item)
@@ -1495,8 +1559,8 @@ all:"Large Language Model" AND all:Reasoning
 
    **关于 [阅读原文] 的特别说明：**
    - 必须使用提供的 url
-   - **重要：** 如果 url 包含 "qbitai.com"、"量子位" 或 "36kr"，请**不要生成** [阅读原文] 这一行，直接开始引用块 (> **概要**...)
-   - **重要：** 如果 url 是论文链接（如包含 "arxiv.org", "openreview.net", "huggingface.co/papers"），请**不要生成** [阅读原文] 这一行，确保该链接出现在 [相关论文] 中。
+   - **重要：** 如果 url 包含 "qbitai.com"、"量子位" 或 "36kr"，请**不要生成** [阅读原文] 这一行（包括日期），直接开始引用块 (> **概要**...)
+   - **重要：** 如果 url 是论文链接（如包含 "arxiv.org", "openreview.net", "huggingface.co/papers"），请**不要生成** [阅读原文] 这一行（包括日期），确保该链接出现在 [相关论文] 中。
 
    **关于 [相关论文] 的特别说明：**
    - 请在“候选 arXiv 论文库”中查找与当前新闻**高度相关**的论文（标题或内容匹配）。
@@ -1534,11 +1598,18 @@ all:"Large Language Model" AND all:Reasoning
                 valid_results = []
                 errors = []
                 for item in results:
+                    # 1. 基础正则检查
                     is_valid, error = self._validate_news_item_format(item.get("markdown_content", ""))
-                    if is_valid:
+                    if not is_valid:
+                        errors.append(f"文章 '{item.get('title', 'Unknown')}' 基础格式错误: {error}")
+                        continue
+                    
+                    # 2. LLM 严格检查
+                    is_strict_valid, strict_error = self._strict_format_check_agent(item.get("markdown_content", ""))
+                    if is_strict_valid:
                         valid_results.append(item)
                     else:
-                        errors.append(f"文章 '{item.get('title', 'Unknown')}' 格式错误: {error}")
+                        errors.append(f"文章 '{item.get('title', 'Unknown')}' 严格格式错误: {strict_error}")
                 
                 if not errors:
                     return valid_results

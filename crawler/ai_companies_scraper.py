@@ -32,8 +32,101 @@ class NVIDIAScraper(BaseWebScraper):
         )
     
     async def get_article_detail(self, article_id: str, url: str) -> Optional[Dict]:
-        """获取文章详情"""
-        return await get_generic_article_detail(self, article_id, url)
+        """获取文章详情 (NVIDIA专用)"""
+        try:
+            logger.info(f"Fetching NVIDIA article details: {article_id}")
+            html = await self.fetch_page(url)
+            if not html:
+                return None
+            
+            soup = BeautifulSoup(html, 'html.parser')
+            
+            article = {
+                'article_id': article_id,
+                'article_url': url,
+                'source_keyword': 'nvidia',
+                'company': 'nvidia',
+            }
+            
+            # Title
+            title_elem = soup.find('h1')
+            article['title'] = self.clean_text(title_elem.get_text()) if title_elem else ''
+            
+            # Content
+            content_elem = soup.find('div', class_='article-content')
+            if not content_elem:
+                content_elem = soup.find('div', class_='news-body')
+            if not content_elem:
+                content_elem = soup.find('main')
+            
+            article['content'] = self.clean_text(content_elem.get_text()) if content_elem else ''
+            
+            # Reference Links
+            reference_links = self.extract_reference_links(soup, content_elem)
+            article['reference_links'] = json.dumps(reference_links, ensure_ascii=False) if reference_links else ''
+            
+            # Publish Time
+            # NVIDIA news usually has date in a div/span with class 'date' or 'timestamp'
+            # Format: "May 21, 2025" or "Wednesday, May 21, 2025"
+            time_str = ''
+            
+            # 1. Try JSON-LD
+            ld_scripts = soup.find_all('script', type='application/ld+json')
+            for script in ld_scripts:
+                try:
+                    data = json.loads(script.string)
+                    if 'datePublished' in data:
+                        time_str = data['datePublished']
+                        break
+                except:
+                    pass
+            
+            # 2. Try meta tags
+            if not time_str:
+                time_elem = soup.find('meta', attrs={'property': 'article:published_time'})
+                if time_elem:
+                    time_str = time_elem.get('content')
+            
+            # 3. Try HTML elements
+            if not time_str:
+                # Look for date in header or specific classes
+                date_elem = soup.find(class_=lambda x: x and any(c in str(x).lower() for c in ['date', 'timestamp', 'published']))
+                if date_elem:
+                    time_str = date_elem.get_text(strip=True)
+            
+            if not time_str:
+                # Fallback: try to find date pattern in the first few lines of text
+                text = soup.get_text()[:1000]
+                # Match: Month DD, YYYY
+                match = re.search(r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}', text, re.IGNORECASE)
+                if match:
+                    time_str = match.group(0)
+            
+            if not time_str:
+                logger.warning(f"Skip article {article_id}: missing publish time.")
+                return None
+                
+            publish_ts = self.parse_timestamp(time_str)
+            if publish_ts is None:
+                logger.warning(f"Skip article {article_id}: cannot parse publish time: {time_str}")
+                return None
+                
+            article['publish_time'] = publish_ts
+            article['publish_date'] = datetime.fromtimestamp(publish_ts).strftime('%Y-%m-%d')
+            
+            # Other fields
+            article['description'] = article['content'][:200]
+            article['author'] = 'NVIDIA'
+            article['category'] = 'News'
+            article['tags'] = ''
+            article['cover_image'] = ''
+            article['is_original'] = 1
+            
+            return article
+            
+        except Exception as e:
+            logger.error(f"Failed to get NVIDIA article details {article_id}: {e}")
+            return None
     
     async def get_article_list(self, page: int = 1) -> List[Dict]:
         """获取文章列表"""

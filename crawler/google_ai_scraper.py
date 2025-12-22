@@ -237,20 +237,33 @@ class GoogleAIScraper(BaseWebScraper):
             # 4. 尝试从页面文本中提取日期模式
             if not time_str:
                 # 查找包含日期的文本元素
+                # Format: May 21, 2025
                 date_pattern = re.compile(r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}', re.IGNORECASE)
+                # Format: 21 May 2025 (DeepMind style)
+                date_pattern_2 = re.compile(r'\d{1,2}\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}', re.IGNORECASE)
                 
                 # 在标题附近或metadata区域查找
                 meta_area = soup.find(['header', 'div'], class_=lambda x: x and any(k in str(x).lower() for k in ['meta', 'info', 'date', 'author']))
                 if meta_area:
-                    match = date_pattern.search(meta_area.get_text())
+                    text = meta_area.get_text()
+                    match = date_pattern.search(text)
                     if match:
                         time_str = match.group(0)
+                    else:
+                        match = date_pattern_2.search(text)
+                        if match:
+                            time_str = match.group(0)
                 
                 if not time_str:
                     # 在全文开头查找（前2000字符）
-                    match = date_pattern.search(soup.get_text()[:2000])
+                    text_start = soup.get_text()[:2000]
+                    match = date_pattern.search(text_start)
                     if match:
                         time_str = match.group(0)
+                    else:
+                        match = date_pattern_2.search(text_start)
+                        if match:
+                            time_str = match.group(0)
             
             if not time_str:
                 logger.warning(f"Skip article {article_id}: missing publish time.")

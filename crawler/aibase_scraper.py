@@ -138,6 +138,9 @@ class AibaseWebScraper(BaseWebScraper):
                 if title_tag:
                     article['title'] = title_tag.get_text(strip=True).split('_')[0].split('-')[0].strip()
 
+            # Source Keyword
+            article['source_keyword'] = 'aibase'
+
             # Content
             content_elem = soup.find(class_=re.compile(r'content|article|detail', re.I))
             # Refine content selection to avoid headers/footers
