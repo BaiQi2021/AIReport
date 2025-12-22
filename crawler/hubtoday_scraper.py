@@ -8,6 +8,7 @@ Crawls articles from https://ai.hubtoday.app/
 import asyncio
 import json
 import re
+import hashlib
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from urllib.parse import urljoin
@@ -103,28 +104,18 @@ class HubTodayScraper(BaseWebScraper):
             logger.error(f"Failed to get HubToday list: {e}")
             return []
     
-    async def get_article_detail(self, article_id: str, url: str) -> Optional[Dict]:
-        """Fetch article details (Daily Report Content)."""
+    async def get_article_detail(self, article_id: str, url: str) -> List[Dict]:
+        """Fetch article details and split by h3 tags."""
         try:
             logger.info(f"Fetching HubToday detail: {article_id}")
             
             html = await self.fetch_page(url)
             if not html:
-                return None
+                return []
             
             soup = BeautifulSoup(html, 'html.parser')
             
-            article = {
-                'article_id': article_id,
-                'article_url': url,
-            }
-            
-            # Title
-            title_elem = soup.find('h1')
-            article['title'] = self.clean_text(title_elem.get_text()) if title_elem else ''
-            
-            # Content
-            # Usually in a specific container, e.g. article or main
+            # Content container
             content_elem = soup.find('article')
             if not content_elem:
                 content_elem = soup.find('main')
@@ -133,50 +124,119 @@ class HubTodayScraper(BaseWebScraper):
                  # Clean up navigation or sidebar if inside main
                  for nav in content_elem.find_all(['nav', 'aside']):
                      nav.decompose()
-            
-            article['content'] = self.clean_text(content_elem.get_text()) if content_elem else ''
-            
-            # Reference links
-            reference_links = self.extract_reference_links(soup, content_elem)
-            article['reference_links'] = json.dumps(reference_links, ensure_ascii=False) if reference_links else ''
-            
-            # Publish Time
-            # Extract from article_id which contains date: hubtoday_2025-12-19
+            else:
+                return []
+
+            # Extract date from article_id
             try:
                 date_str = article_id.replace('hubtoday_', '')
                 dt = datetime.strptime(date_str, '%Y-%m-%d')
-                article['publish_time'] = int(dt.timestamp())
-                article['publish_date'] = date_str
+                publish_time = int(dt.timestamp())
+                publish_date = date_str
             except:
-                article['publish_time'] = int(datetime.now().timestamp())
-                article['publish_date'] = datetime.now().strftime('%Y-%m-%d')
+                publish_time = int(datetime.now().timestamp())
+                publish_date = datetime.now().strftime('%Y-%m-%d')
 
-            # Description
-            article['description'] = article['content'][:200]
-            
-            # Author
-            article['author'] = '何夕2077'
-            
-            # Cover Image
-            img_elem = soup.find('img')
-            article['cover_image'] = img_elem.get('src', '') if img_elem else ''
+            # Common fields
+            base_article = {
+                'article_url': url,
+                'publish_time': publish_time,
+                'publish_date': publish_date,
+                'author': '何夕2077',
+                'cover_image': soup.find('img').get('src', '') if soup.find('img') else '',
+                'tags': json.dumps(['AI日报', 'AI News'], ensure_ascii=False),
+                'read_count': 0,
+                'like_count': 0,
+                'comment_count': 0,
+                'share_count': 0,
+                'collect_count': 0,
+                'is_original': 0,
+            }
 
-            # Tags
-            article['tags'] = json.dumps(['AI日报', 'AI News'], ensure_ascii=False)
+            articles = []
+            h3_tags = content_elem.find_all('h3')
             
-            # Defaults
-            article['read_count'] = 0
-            article['like_count'] = 0
-            article['comment_count'] = 0
-            article['share_count'] = 0
-            article['collect_count'] = 0
-            article['is_original'] = 0
+            if not h3_tags:
+                # Fallback: treat whole page as one article
+                title_elem = soup.find('h1')
+                title = self.clean_text(title_elem.get_text()) if title_elem else ''
+                content = self.clean_text(content_elem.get_text())
+                
+                article = base_article.copy()
+                article['article_id'] = article_id
+                article['title'] = title
+                article['content'] = content
+                article['description'] = content[:200]
+                
+                reference_links = self.extract_reference_links(soup, content_elem)
+                article['reference_links'] = json.dumps(reference_links, ensure_ascii=False) if reference_links else ''
+                
+                articles.append(article)
+            else:
+                # Split by h3, including content before the first h3
+                
+                # Iterate through all children to capture everything in order
+                current_title = "今日摘要" # Default for content before first h3
+                current_nodes = []
+                
+                for child in content_elem.children:
+                    if child.name == 'h3':
+                        # If we have accumulated content, save it as a section
+                        if current_nodes:
+                            full_html = "".join(current_nodes)
+                            fragment_soup = BeautifulSoup(full_html, 'html.parser')
+                            content_text = self.clean_text(fragment_soup.get_text())
+                            
+                            if content_text:
+                                # Generate ID
+                                hash_object = hashlib.md5(current_title.encode('utf-8'))
+                                title_hash = hash_object.hexdigest()[:8]
+                                new_article_id = f"{article_id}_{title_hash}"
+                                
+                                article = base_article.copy()
+                                article['article_id'] = new_article_id
+                                article['title'] = current_title
+                                article['content'] = content_text
+                                article['description'] = content_text[:200]
+                                
+                                reference_links = self.extract_reference_links(soup, fragment_soup)
+                                article['reference_links'] = json.dumps(reference_links, ensure_ascii=False) if reference_links else ''
+                                
+                                articles.append(article)
+                        
+                        # Start new section
+                        current_title = self.clean_text(child.get_text())
+                        current_nodes = []
+                    else:
+                        current_nodes.append(str(child))
+                
+                # Don't forget the last section
+                if current_nodes and current_title:
+                    full_html = "".join(current_nodes)
+                    fragment_soup = BeautifulSoup(full_html, 'html.parser')
+                    content_text = self.clean_text(fragment_soup.get_text())
+                    
+                    if content_text:
+                        hash_object = hashlib.md5(current_title.encode('utf-8'))
+                        title_hash = hash_object.hexdigest()[:8]
+                        new_article_id = f"{article_id}_{title_hash}"
+                        
+                        article = base_article.copy()
+                        article['article_id'] = new_article_id
+                        article['title'] = current_title
+                        article['content'] = content_text
+                        article['description'] = content_text[:200]
+                        
+                        reference_links = self.extract_reference_links(soup, fragment_soup)
+                        article['reference_links'] = json.dumps(reference_links, ensure_ascii=False) if reference_links else ''
+                        
+                        articles.append(article)
             
-            return article
+            return articles
             
         except Exception as e:
             logger.error(f"Failed to get detail {article_id}: {e}")
-            return None
+            return []
 
 async def save_article_to_db(article: Dict):
     """Save article to AibaseArticle table (reused for HubToday)."""
@@ -233,15 +293,17 @@ async def run_crawler(days=3):
                         logger.warning(f"Invalid date format for article {article_item['article_id']}: {article_date_str}")
                         continue
 
-                article = await scraper.get_article_detail(
+                articles_list = await scraper.get_article_detail(
                     article_item['article_id'],
                     article_item['url']
                 )
                 
-                if not article:
+                if not articles_list:
                     continue
                 
-                await save_article_to_db(article)
+                for article in articles_list:
+                    await save_article_to_db(article)
+                
                 await asyncio.sleep(2)
                 
             except Exception as e:
