@@ -13,7 +13,7 @@ from crawler.scheduler import run_all_crawlers, CrawlerScheduler
 from crawler import get_global_registry, CrawlerType
 from analysis.gemini_agent import GeminiAIReportAgent
 from database.db_session import init_db, get_session
-from database.models import QbitaiArticle, CompanyArticle, AibaseArticle
+from database.models import QbitaiArticle, CompanyArticle, AibaseArticle, BaaiHubArticle
 from sqlalchemy import select, func, desc
 
 # Page Config
@@ -97,8 +97,9 @@ async def get_article_count_in_range(days):
         q_count = await session.scalar(select(func.count(QbitaiArticle.id)).where(QbitaiArticle.publish_time >= cutoff_time))
         c_count = await session.scalar(select(func.count(CompanyArticle.id)).where(CompanyArticle.publish_time >= cutoff_time))
         a_count = await session.scalar(select(func.count(AibaseArticle.id)).where(AibaseArticle.publish_time >= cutoff_time))
+        b_count = await session.scalar(select(func.count(BaaiHubArticle.id)).where(BaaiHubArticle.publish_time >= cutoff_time))
         
-        return q_count + c_count + a_count
+        return q_count + c_count + a_count + b_count
 
 async def get_db_stats():
     await init_db()
@@ -107,12 +108,14 @@ async def get_db_stats():
         qbitai_count = await session.scalar(select(func.count(QbitaiArticle.id)))
         company_count = await session.scalar(select(func.count(CompanyArticle.id)))
         aibase_count = await session.scalar(select(func.count(AibaseArticle.id)))
+        baai_count = await session.scalar(select(func.count(BaaiHubArticle.id)))
         
         return {
             "QbitAI": qbitai_count,
             "Company Blogs": company_count,
             "Aibase": aibase_count,
-            "Total": qbitai_count + company_count + aibase_count
+            "BAAI Hub": baai_count,
+            "Total": qbitai_count + company_count + aibase_count + baai_count
         }
 
 def update_data_preview(container, items, stage):
@@ -247,7 +250,7 @@ target_crawlers = {
     "Meta AI": "meta",
     "NVIDIA": "nvidia",
     "Google DeepMind": "google_deepmind",
-    "HubToday": "hubtoday",
+    "BAAI Hub": "baai_hub",
     "量子位": "qbitai",
     "AIbase": "aibase"
 }
@@ -303,7 +306,7 @@ st.sidebar.markdown("---")
 st.sidebar.info("Designed for AIReport Project")
 
 # Main Content
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4, col5 = st.columns(5)
 
 # Load stats
 try:
@@ -312,6 +315,7 @@ try:
     col2.metric("QbitAI", stats["QbitAI"])
     col3.metric("公司博客", stats["Company Blogs"])
     col4.metric("Aibase", stats["Aibase"])
+    col5.metric("BAAI Hub", stats["BAAI Hub"])
 except Exception as e:
     st.error(f"无法连接数据库: {e}")
 
@@ -347,15 +351,19 @@ else:
             # Fetch a few from each table
             q_stmt = select(QbitaiArticle.title, QbitaiArticle.publish_date, QbitaiArticle.article_url).order_by(desc(QbitaiArticle.publish_time)).limit(5)
             c_stmt = select(CompanyArticle.title, CompanyArticle.publish_date, CompanyArticle.article_url).order_by(desc(CompanyArticle.publish_time)).limit(5)
+            b_stmt = select(BaaiHubArticle.title, BaaiHubArticle.publish_date, BaaiHubArticle.article_url).order_by(desc(BaaiHubArticle.publish_time)).limit(5)
             
             q_res = await session.execute(q_stmt)
             c_res = await session.execute(c_stmt)
+            b_res = await session.execute(b_stmt)
             
             data = []
             for row in q_res:
                 data.append({"Title": row.title, "Date": row.publish_date, "Source": "QbitAI", "URL": row.article_url})
             for row in c_res:
                 data.append({"Title": row.title, "Date": row.publish_date, "Source": "Company Blog", "URL": row.article_url})
+            for row in b_res:
+                data.append({"Title": row.title, "Date": row.publish_date, "Source": "BAAI Hub", "URL": row.article_url})
                 
             return pd.DataFrame(data)
 

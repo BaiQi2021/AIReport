@@ -19,7 +19,7 @@ from openai import OpenAI
 import httpx
 from sqlalchemy import select, desc, or_, delete
 
-from database.models import QbitaiArticle, CompanyArticle, AibaseArticle
+from database.models import QbitaiArticle, CompanyArticle, AibaseArticle, BaaiHubArticle
 from database.db_session import get_session
 import config
 from crawler import utils
@@ -96,9 +96,10 @@ class GeminiAIReportAgent:
         Args:
             max_retries: 每个步骤的最大重试次数
         """
+        # 优先使用配置中的值，如果没有则使用 litellm 默认值
         self.api_key = settings.REPORT_ENGINE_API_KEY
         self.base_url = settings.REPORT_ENGINE_BASE_URL
-        self.model_name = settings.REPORT_ENGINE_MODEL_NAME or "gemini-3-pro-preview"
+        self.model_name = settings.REPORT_ENGINE_MODEL_NAME
         self.max_retries = max_retries
         
         if not self.api_key:
@@ -204,6 +205,30 @@ class GeminiAIReportAgent:
                     original_id=art.article_id,
                     source_table="aibase_article"
                 ))
+
+            # 获取 BAAI Hub 文章
+            stmt = (
+                select(BaaiHubArticle)
+                .where(BaaiHubArticle.publish_time >= cutoff_ts)
+                .order_by(desc(BaaiHubArticle.publish_time))
+                .limit(limit)
+            )
+            result = await session.execute(stmt)
+            baai_articles = result.scalars().all()
+            
+            for art in baai_articles:
+                news_items.append(NewsItem(
+                    article_id=f"baai_{art.article_id}",
+                    title=art.title,
+                    description=art.description or "",
+                    content=art.content or "",
+                    url=art.article_url,
+                    source="BAAI Hub",
+                    publish_time=art.publish_time,
+                    reference_links=art.reference_links,
+                    original_id=art.article_id,
+                    source_table="baai_hub_article"
+                ))
         
         logger.info(f"共获取 {len(news_items)} 条新闻数据")
         return news_items
@@ -224,6 +249,7 @@ class GeminiAIReportAgent:
         qbitai_ids = []
         company_ids = []
         aibase_ids = []
+        baai_ids = []
         
         for item in items_to_delete:
             if not item.original_id or not item.source_table:
@@ -236,6 +262,8 @@ class GeminiAIReportAgent:
                 company_ids.append(item.original_id)
             elif item.source_table == "aibase_article":
                 aibase_ids.append(item.original_id)
+            elif item.source_table == "baai_hub_article":
+                baai_ids.append(item.original_id)
         
         async with get_session() as session:
             try:
@@ -253,6 +281,11 @@ class GeminiAIReportAgent:
                     stmt = delete(AibaseArticle).where(AibaseArticle.article_id.in_(aibase_ids))
                     result = await session.execute(stmt)
                     logger.info(f"已删除 {result.rowcount} 条 Aibase 数据")
+
+                if baai_ids:
+                    stmt = delete(BaaiHubArticle).where(BaaiHubArticle.article_id.in_(baai_ids))
+                    result = await session.execute(stmt)
+                    logger.info(f"已删除 {result.rowcount} 条 BAAI Hub 数据")
                 
                 await session.commit()
             except Exception as e:
@@ -274,7 +307,15 @@ class GeminiAIReportAgent:
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=temperature
+                temperature=temperature,
+                extra_body={
+                    "metadata": {
+                        "generation_name": "gemini-agent-generation",
+                        "generation_id": f"gen-{int(time.time())}",
+                        "trace_id": f"trace-{int(time.time())}",
+                        "trace_user_id": "gemini-agent-user"
+                    }
+                }
             )
             return response.choices[0].message.content
         except Exception as e:
@@ -387,6 +428,7 @@ class GeminiAIReportAgent:
 2. 市场分析: 投资观点、市场情绪、资本动向、无直接技术关联的商业合作新闻。
 3. 二次解读: 个人观点、KOL 长篇分析、无引用的推文总结。
 4. 信源不明: 未标注明确来源、来源为匿名论坛或社交群聊截图。
+5. 聚合类: 新闻聚合、热点汇总、排行榜单等无新增技术信息的内容。
 
 **新闻数据：**
 ```json

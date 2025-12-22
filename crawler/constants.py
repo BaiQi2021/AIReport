@@ -31,7 +31,7 @@ DB_TABLE_MAP = {
     'news': 'qbitai_article',  # 新闻文章表
     'tools': 'qbitai_article',  # AI工具文章表
     'aibase': 'aibase_article',  # AIbase文章表
-    'hubtoday': 'aibase_article',  # HubToday文章表(复用)
+    'baai_hub': 'baai_hub_article',  # BAAI Hub文章表
 }
 
 # 爬虫配置信息（用于注册）
@@ -112,16 +112,16 @@ CRAWLER_CONFIGS: List[Dict] = [
         'db_table': 'aibase_article',
     },
     {
-        'key': 'hubtoday',
-        'name': 'HubToday',
-        'module': 'crawler.hubtoday_scraper',
-        'class': 'HubTodayScraper',
+        'key': 'baai_hub',
+        'name': 'BAAI Hub',
+        'module': 'crawler.baai_hub_scraper',
+        'class': 'BaaiHubScraper',
         'runner': 'run_crawler',
         'type': 'news',
         'enabled': True,
         'priority': 1,
-        'description': 'He Xi 2077 AI Daily',
-        'db_table': 'aibase_article',
+        'description': 'Beijing Academy of Artificial Intelligence Hub',
+        'db_table': 'baai_hub_article',
     },
     {
         'key': 'qbitai',

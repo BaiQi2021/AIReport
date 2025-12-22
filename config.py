@@ -28,8 +28,8 @@ class Settings(BaseSettings):
     # Analysis API Configuration
     # Using 'REPORT_ENGINE' prefix to match previous setup, or simplify to just API_KEY
     REPORT_ENGINE_API_KEY: Optional[str] = Field(None, description="API Key for the LLM")
-    REPORT_ENGINE_BASE_URL: Optional[str] = Field("https://generativelanguage.googleapis.com/v1beta/openai/", description="Base URL for the LLM API")
-    REPORT_ENGINE_MODEL_NAME: Optional[str] = Field("gemini-3-pro-preview", description="Model name to use")
+    REPORT_ENGINE_BASE_URL: Optional[str] = Field("http://litellm.aviagames.net", description="Base URL for the LLM API")
+    REPORT_ENGINE_MODEL_NAME: Optional[str] = Field("gpt-3.5-turbo", description="Model name to use")
     
     # Gemini API Configuration (向后兼容)
     GEMINI_API_KEY: Optional[str] = Field(None, description="Gemini API Key")

@@ -26,7 +26,7 @@ sys.path.insert(0, str(project_root))
 from config import settings
 
 # 导入数据库模型
-from database.models import Base, QbitaiArticle, QbitaiArticleComment
+from database.models import Base, QbitaiArticle, QbitaiArticleComment, BaaiHubArticle
 
 
 def _build_database_url() -> str:
