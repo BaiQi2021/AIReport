@@ -212,6 +212,48 @@ async def save_company_article_to_db(article: Dict):
             logger.info(f"Saved new article: {article_id}")
 
 
+async def run_nvidia_crawler(days: int = 7):
+    """运行NVIDIA爬虫"""
+    logger.info(f"Starting NVIDIA Crawler (days={days})...")
+    scraper = NVIDIAScraper()
+    await scraper.init()
+    
+    try:
+        articles = await scraper.get_article_list()
+        logger.info(f"Found {len(articles)} articles")
+        
+        for article_item in articles:
+            try:
+                article = await scraper.get_article_detail(
+                    article_item['article_id'],
+                    article_item['url']
+                )
+                
+                if article:
+                    # 检查日期
+                    if days > 0:
+                        article_ts = article['publish_time']
+                        now_ts = datetime.now().timestamp()
+                        if article_ts > now_ts + 86400:
+                             logger.warning(f"Skip article {article['title']}: future date ({article['publish_date']})")
+                             continue
+                        if now_ts - article_ts > days * 86400:
+                             logger.info(f"Skip article {article['title']}: too old ({article['publish_date']})")
+                             continue
+
+                    await save_company_article_to_db(article)
+                
+                await asyncio.sleep(2)
+                
+            except Exception as e:
+                logger.error(f"Error processing NVIDIA article: {e}")
+                continue
+                
+    finally:
+        await scraper.close()
+        logger.info("NVIDIA Crawler finished.")
+
+
 if __name__ == "__main__":
     async def test():
         scraper = NVIDIAScraper()

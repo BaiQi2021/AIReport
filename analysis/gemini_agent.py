@@ -19,7 +19,7 @@ from openai import OpenAI
 import httpx
 from sqlalchemy import select, desc, or_, delete
 
-from database.models import QbitaiArticle, CompanyArticle
+from database.models import QbitaiArticle, CompanyArticle, AibaseArticle
 from database.db_session import get_session
 import config
 from crawler import utils
@@ -180,6 +180,30 @@ class GeminiAIReportAgent:
                     original_id=art.article_id,
                     source_table="company_article"
                 ))
+
+            # 获取 Aibase 文章
+            stmt = (
+                select(AibaseArticle)
+                .where(AibaseArticle.publish_time >= cutoff_ts)
+                .order_by(desc(AibaseArticle.publish_time))
+                .limit(limit)
+            )
+            result = await session.execute(stmt)
+            aibase_articles = result.scalars().all()
+            
+            for art in aibase_articles:
+                news_items.append(NewsItem(
+                    article_id=f"aibase_{art.article_id}",
+                    title=art.title,
+                    description=art.description or "",
+                    content=art.content or "",
+                    url=art.article_url,
+                    source="AIbase",
+                    publish_time=art.publish_time,
+                    reference_links=art.reference_links,
+                    original_id=art.article_id,
+                    source_table="aibase_article"
+                ))
         
         logger.info(f"共获取 {len(news_items)} 条新闻数据")
         return news_items
@@ -199,6 +223,7 @@ class GeminiAIReportAgent:
         # 按表分组
         qbitai_ids = []
         company_ids = []
+        aibase_ids = []
         
         for item in items_to_delete:
             if not item.original_id or not item.source_table:
@@ -209,6 +234,8 @@ class GeminiAIReportAgent:
                 qbitai_ids.append(item.original_id)
             elif item.source_table == "company_article":
                 company_ids.append(item.original_id)
+            elif item.source_table == "aibase_article":
+                aibase_ids.append(item.original_id)
         
         async with get_session() as session:
             try:
@@ -221,6 +248,11 @@ class GeminiAIReportAgent:
                     stmt = delete(CompanyArticle).where(CompanyArticle.article_id.in_(company_ids))
                     result = await session.execute(stmt)
                     logger.info(f"已删除 {result.rowcount} 条 Company 数据")
+
+                if aibase_ids:
+                    stmt = delete(AibaseArticle).where(AibaseArticle.article_id.in_(aibase_ids))
+                    result = await session.execute(stmt)
+                    logger.info(f"已删除 {result.rowcount} 条 Aibase 数据")
                 
                 await session.commit()
             except Exception as e:
@@ -808,18 +840,19 @@ class GeminiAIReportAgent:
                             item.hype_score = r.get("hype_score", 1)
                             
                             # 计算最终评分
+                            # 调整权重：提高技术影响力和行业影响力的权重，降低热度权重（因为新发布的新闻热度通常较低）
                             item.final_score = (
-                                item.tech_impact * 0.5 +
-                                item.industry_scope * 0.3 +
-                                item.hype_score * 0.2
+                                item.tech_impact * 0.6 +      # 原 0.5
+                                item.industry_scope * 0.3 +   # 原 0.3
+                                item.hype_score * 0.1         # 原 0.2
                             )
                             
-                            # 评级映射
-                            if item.final_score >= 4.2:
+                            # 评级映射 - 调整阈值
+                            if item.final_score >= 4.0:       # 原 4.2
                                 item.ranking_level = "S"
-                            elif item.final_score >= 3.5:
+                            elif item.final_score >= 3.2:     # 原 3.5
                                 item.ranking_level = "A"
-                            elif item.final_score >= 2.8:
+                            elif item.final_score >= 2.4:     # 原 2.8
                                 item.ranking_level = "B"
                             else:
                                 item.ranking_level = "C"
@@ -1028,7 +1061,7 @@ all:"Large Language Model" AND all:Reasoning
         """验证新闻条目的 Markdown 格式"""
         required_patterns = [
             (r"### \*\*.*?\*\*", "标题格式错误，应为 ### **标题**"),
-            (r"\[阅读原文\]\(.*?\)", "缺少阅读原文链接或格式错误"),
+            # (r"\[阅读原文\]\(.*?\)", "缺少阅读原文链接或格式错误"), # 阅读原文现在是可选的（量子位链接不显示）
             (r"> \*\*概要\*\*:.*", "缺少概要或格式错误"),
             (r"\*\*💡内容详解\*\*", "缺少'💡内容详解'分节"),
             (r"- \*\*.*?\*\*", "缺少要点标题或格式错误")
@@ -1057,7 +1090,7 @@ all:"Large Language Model" AND all:Reasoning
             优先级最高的 URL
         """
         # 如果新闻本身来自官方源（非量子位等二手媒体），直接返回
-        non_official_sources = ["量子位", "qbitai", "36kr", "新智元"]
+        non_official_sources = ["量子位", "qbitai", "36kr", "新智元", "aibase"]
         if item.source and not any(s.lower() in item.source.lower() for s in non_official_sources):
             return item.url
         
@@ -1115,7 +1148,7 @@ all:"Large Language Model" AND all:Reasoning
         
         return item.url
 
-    async def _generate_event_entries_batch(self, batch_events: List[Dict], candidate_papers: List[Dict] = None) -> List[Dict[str, str]]:
+    async def _generate_event_entries_batch(self, batch_events: List[Dict], candidate_papers: List[Dict] = None, custom_instructions: str = "") -> List[Dict[str, str]]:
         """
         按事件生成报告条目（每个事件综合其下所有新闻）
         
@@ -1138,6 +1171,8 @@ all:"Large Language Model" AND all:Reasoning
             # 综合所有新闻的内容
             combined_content = ""
             sources_info = []
+            combined_refs = []  # 收集所有新闻的参考链接
+            
             for idx, item in enumerate(all_items, 1):
                 item_url = self._get_primary_source_url(item)
                 sources_info.append({
@@ -1148,6 +1183,15 @@ all:"Large Language Model" AND all:Reasoning
                 combined_content += f"\n--- 来源 {idx}: {item.source} ---\n"
                 combined_content += f"标题: {item.title}\n"
                 combined_content += f"内容: {item.content}\n"
+                
+                # 收集参考链接
+                if item.reference_links:
+                    try:
+                        refs = json.loads(item.reference_links)
+                        if refs:
+                            combined_refs.extend(refs)
+                    except:
+                        pass
             
             pub_date = datetime.fromtimestamp(best_item.publish_time).strftime('%Y-%m-%d %H:%M')
             
@@ -1159,7 +1203,8 @@ all:"Large Language Model" AND all:Reasoning
                 "publish_time": pub_date,
                 "news_count": len(all_items),
                 "combined_content": combined_content,  # 综合所有新闻的内容
-                "all_sources": sources_info  # 所有来源信息
+                "all_sources": sources_info,  # 所有来源信息
+                "reference_links": combined_refs  # 传递参考链接给 LLM
             })
 
         # 构建候选论文上下文
@@ -1173,6 +1218,7 @@ all:"Large Language Model" AND all:Reasoning
         prompt = f"""你是一个专业的AI技术分析师。请为以下**事件**生成符合报告格式的Markdown内容块。
 
 **重要说明：**
+{custom_instructions if custom_instructions else ""}
 - 每个事件可能包含多条来自不同来源的新闻报道
 - 请综合所有来源的信息，生成一个完整、不重复的事件报告
 - 优先使用官方来源的信息，辅以其他来源的补充细节
@@ -1183,9 +1229,18 @@ all:"Large Language Model" AND all:Reasoning
 **输出要求：**
 对于每一个事件，请执行以下操作：
 1. **分类**：将其归入以下三类之一：
-   - "Infrastructure" (AI基础设施: 芯片, 算力, 框架, 数据工程等)
-   - "Model" (AI模型与技术: 基础模型, 算法创新, 训练技术等)
-   - "Application" (AI应用与智能体: 具体应用, Agent, 行业落地等)
+   - "Infrastructure" (AI Infra):
+     - 算力基础设施：GPU相关 (Nvidia, Moore Threads, Kunlunxin, Pingtouge, Ascend, Hygon)
+     - 数据与AI中台层：云厂商产品 (AWS, GCP, Aliyun, Volcano, Tencent, Huawei)
+     - 统一算力管理与调度
+   - "Model" (AI Model Progress):
+     - 全球基础大模型图谱 (GPT, Gemini, Grok, Claude, DS, Qwen, Kimi, GLM, Wenxin, Longcat, Keling等)
+     - 大模型最新发布、训练技术 (Pretrain, Post-pretrain, SFT, RLHF)、推理技术
+     - 数据构建技术 (清洗, 增强, 合成)
+     - 智能体构建技术 (框架: LangChain, CrewAI, AutoGen...; 产品: Bedrock Agent, Dify, Coze...)
+   - "Application" (AI Agent & Application):
+     - 大模型泛应用 (B/C端智能体, 工具类产品)
+     - 游戏行业应用
 
 2. **生成Markdown内容**：严格遵循以下Markdown格式模板生成内容。
    
@@ -1230,10 +1285,14 @@ all:"Large Language Model" AND all:Reasoning
 
    **关于 [阅读原文] 的特别说明：**
    - 必须使用提供的 primary_url，这是优先级最高的官方核心信源
+   - **重要：** 如果 primary_url 包含 "qbitai.com"、"量子位" 或 "36kr"，请**不要生成** [阅读原文] 这一行，直接开始引用块 (> **概要**...)
+   - **重要：** 如果 primary_url 是论文链接（如包含 "arxiv.org", "openreview.net", "huggingface.co/papers"），请**不要生成** [阅读原文] 这一行，确保该链接出现在 [相关论文] 中。
    - 禁止使用量子位、36kr等二手媒体链接
 
    **关于 [相关论文] 的特别说明：**
    - 请在"候选 arXiv 论文库"中查找与当前事件**高度相关**的论文
+   - **或者**，如果提供的事件内容（新闻原文）中明确包含了相关论文的链接（如 arXiv 链接），请直接使用该链接
+   - **或者**，请检查提供的 `reference_links` 字段，如果其中包含论文类型的链接（如 type="paper" 或 "arxiv"），请优先使用
    - 如果找到匹配的论文，请将 `[相关论文]([URL])` 替换为实际的论文链接
    - **如果没有找到高度相关的论文，请务必删除这一行**
 
@@ -1304,6 +1363,14 @@ all:"Large Language Model" AND all:Reasoning
             # 获取优先级最高的官方信源 URL
             primary_url = self._get_primary_source_url(item)
             
+            # 解析参考链接
+            refs = []
+            if item.reference_links:
+                try:
+                    refs = json.loads(item.reference_links)
+                except:
+                    pass
+
             batch_data.append({
                 "article_id": item.article_id,
                 "title": item.title,
@@ -1311,6 +1378,7 @@ all:"Large Language Model" AND all:Reasoning
                 "url": primary_url,  # 使用优先级最高的官方信源
                 "publish_time": pub_date,
                 "content": item.content,  # 使用完整内容进行深度阅读
+                "reference_links": refs  # 传递参考链接给 LLM
             })
 
         # 构建候选论文上下文
@@ -1329,9 +1397,18 @@ all:"Large Language Model" AND all:Reasoning
 **输出要求：**
 对于每一条新闻，请执行以下操作：
 1. **分类**：将其归入以下三类之一：
-   - "Infrastructure" (AI基础设施: 芯片, 算力, 框架, 数据工程等)
-   - "Model" (AI模型与技术: 基础模型, 算法创新, 训练技术等)
-   - "Application" (AI应用与智能体: 具体应用, Agent, 行业落地等)
+   - "Infrastructure" (AI Infra):
+     - 算力基础设施：GPU相关 (Nvidia, Moore Threads, Kunlunxin, Pingtouge, Ascend, Hygon)
+     - 数据与AI中台层：云厂商产品 (AWS, GCP, Aliyun, Volcano, Tencent, Huawei)
+     - 统一算力管理与调度
+   - "Model" (AI Model Progress):
+     - 全球基础大模型图谱 (GPT, Gemini, Grok, Claude, DS, Qwen, Kimi, GLM, Wenxin, Longcat, Keling等)
+     - 大模型最新发布、训练技术 (Pretrain, Post-pretrain, SFT, RLHF)、推理技术
+     - 数据构建技术 (清洗, 增强, 合成)
+     - 智能体构建技术 (框架: LangChain, CrewAI, AutoGen...; 产品: Bedrock Agent, Dify, Coze...)
+   - "Application" (AI Agent & Application):
+     - 大模型泛应用 (B/C端智能体, 工具类产品)
+     - 游戏行业应用
 
 2. **生成Markdown内容**：严格遵循以下Markdown格式模板生成内容。
    
@@ -1374,8 +1451,15 @@ all:"Large Language Model" AND all:Reasoning
     [相关论文]([URL])
    ```
 
+   **关于 [阅读原文] 的特别说明：**
+   - 必须使用提供的 url
+   - **重要：** 如果 url 包含 "qbitai.com"、"量子位" 或 "36kr"，请**不要生成** [阅读原文] 这一行，直接开始引用块 (> **概要**...)
+   - **重要：** 如果 url 是论文链接（如包含 "arxiv.org", "openreview.net", "huggingface.co/papers"），请**不要生成** [阅读原文] 这一行，确保该链接出现在 [相关论文] 中。
+
    **关于 [相关论文] 的特别说明：**
    - 请在“候选 arXiv 论文库”中查找与当前新闻**高度相关**的论文（标题或内容匹配）。
+   - **或者**，如果提供的事件内容（新闻原文）中明确包含了相关论文的链接（如 arXiv 链接），请直接使用该链接。
+   - **或者**，请检查提供的 `reference_links` 字段，如果其中包含论文类型的链接（如 type="paper" 或 "arxiv"），请优先使用。
    - 如果找到匹配的论文，请将 `[相关论文]([URL])` 替换为实际的论文链接，例如 `[相关论文](https://arxiv.org/abs/2412.xxxxx)`。
    - 如果有多篇相关，可以列出多行，格式均为 `[相关论文](URL)` 或 `[相关论文: Title](URL)`。
    - **如果没有找到高度相关的论文，请务必删除 `[相关论文]([URL])` 这一行，不要保留空行或占位符。**
@@ -1430,7 +1514,7 @@ all:"Large Language Model" AND all:Reasoning
             
         return []
 
-    async def generate_final_report(self, news_items: List[NewsItem], arxiv_papers: List[Dict] = None, quality_check: bool = True, days: int = 7, target_count: int = 10) -> Optional[str]:
+    async def generate_final_report(self, news_items: List[NewsItem], arxiv_papers: List[Dict] = None, quality_check: bool = True, days: int = 7, target_count: int = 10, custom_instructions: str = "") -> Optional[str]:
         """
         生成最终报告 (多轮生成模式)
         
@@ -1489,7 +1573,7 @@ all:"Large Language Model" AND all:Reasoning
             logger.info(f"正在生成报告详情：批次 {i // batch_size + 1} (共 {len(batch_events)} 个事件)")
             
             # 按事件生成内容，每个事件使用其下所有新闻
-            entries = await self._generate_event_entries_batch(batch_events, candidate_papers=arxiv_papers)
+            entries = await self._generate_event_entries_batch(batch_events, candidate_papers=arxiv_papers, custom_instructions=custom_instructions)
             if entries:
                 generated_entries.extend(entries)
             else:
@@ -1537,7 +1621,7 @@ all:"Large Language Model" AND all:Reasoning
         overview_prompt = f"""请为以下新闻生成"本期速览"列表。
 要求：
 - 每条新闻用一行 Markdown 列表项表示。
-- 格式：* **[[标签]]** [**新闻标题**]: [1-2句话核心看点]
+- 格式：* **[标签]** **新闻标题**: [1-2句话核心看点]
 - 标签示例：[大模型], [芯片], [应用]等
 - 必须严格遵守上述格式，不要添加其他内容。
 
@@ -1552,7 +1636,7 @@ all:"Large Language Model" AND all:Reasoning
         if "**[[" not in overview_content:
              logger.warning("概览格式可能不符合要求，尝试修复...")
              # 简单的重试逻辑
-             overview_prompt += "\n\n**修正要求**: 上次生成格式不正确。请确保每行以 '* **[[标签]]**' 开头。"
+             overview_prompt += "\n\n**修正要求**: 上次生成格式不正确。请确保每行以 '* **[标签]**' 开头。"
              retry_content = self._call_llm(overview_prompt)
              if retry_content and "**[[" in retry_content:
                  overview_content = retry_content

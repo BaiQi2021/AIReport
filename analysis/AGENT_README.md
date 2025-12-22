@@ -262,9 +262,9 @@ agent = GeminiAIReportAgent(max_retries=5)  # 增加重试次数
 ```python
 # 调整权重
 item.final_score = (
-    item.tech_impact * 0.6 +      # 增加技术影响力的权重
+    item.tech_impact * 0.7 +      # 进一步增加技术影响力的权重
     item.industry_scope * 0.2 +   # 减少行业范围的权重
-    item.hype_score * 0.2
+    item.hype_score * 0.1
 )
 ```
 

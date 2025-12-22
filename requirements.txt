@@ -11,3 +11,5 @@ pydantic-settings
 greenlet
 tabulate
 cloudscraper
+streamlit
+pandas

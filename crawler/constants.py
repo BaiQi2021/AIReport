@@ -78,7 +78,7 @@ CRAWLER_CONFIGS: List[Dict] = [
         'name': 'NVIDIA',
         'module': 'crawler.ai_companies_scraper',
         'class': 'NVIDIAScraper',
-        'runner': None,
+        'runner': 'run_nvidia_crawler',
         'type': 'company',
         'enabled': True,
         'priority': 2,
